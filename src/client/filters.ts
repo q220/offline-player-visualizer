@@ -9,9 +9,11 @@ import {
   toggleHeatmapVisibility,
   toggleBlockMapVisibility,
   toggleExtendedBounds,
+  setCustomBounds,
   getMap,
 } from './map';
-import { setPlayerDimension, setPlayerDateFilter, getPlayerDateFilter, setPlayerExtendedBounds } from './player-layer';
+import { setPlayerDimension, setPlayerDateFilter, getPlayerDateFilter, setPlayerExtendedBounds, setAreaBoundsOverride } from './player-layer';
+import { initAreaSelect, onAreaBoundsChange, clearArea, getAreaBounds } from './area-select';
 import { dimensionSlug } from '../shared/constants';
 import { setStatus, clearStatus } from './status';
 
@@ -196,6 +198,40 @@ export function initFilters(info: WorldInfo): void {
   const map = getMap();
   map.on('moveend', () => scheduleViewportRender());
   map.on('zoomend', () => scheduleViewportRender());
+
+  // Area select tool
+  initAreaSelect(map, info);
+  onAreaBoundsChange((bounds) => {
+    // Update map maxBounds and fit
+    setCustomBounds(bounds);
+    // Clamp player dots to area
+    setAreaBoundsOverride(bounds);
+    // Disable OOB toggle while area is active
+    if (toggleOobEl) {
+      if (bounds) {
+        toggleOobEl.disabled = true;
+        toggleOobEl.parentElement!.style.opacity = '0.5';
+      } else if (info.playerBounds) {
+        toggleOobEl.disabled = false;
+        toggleOobEl.parentElement!.style.opacity = '1';
+      }
+    }
+    // Re-render heatmap for the area
+    if (bounds) {
+      renderAreaHeatmap(bounds);
+    } else {
+      // Restore default heatmap
+      const slug = dimensionSlug(currentDimension);
+      setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
+      if (worldInfo.heatmapDensity?.[currentDimension]) {
+        const density = worldInfo.heatmapDensity[currentDimension];
+        setHeatmapLegend(density.maxPerChunk, density.totalPlayers);
+        if (density.contoursUrl) {
+          loadContours(density.contoursUrl);
+        }
+      }
+    }
+  });
 }
 
 function updateFilterInfo(
@@ -221,6 +257,7 @@ function updateFilterInfo(
 
 function setDimension(dim: string): void {
   currentDimension = dim;
+  clearArea(); // Clear area selection on dimension switch
   setBlockMap(dim, worldInfo);
   setPlayerDimension(dim);
 
@@ -243,7 +280,44 @@ function scheduleViewportRender(): void {
   viewportTimer = setTimeout(() => renderForViewport(), 500);
 }
 
+async function renderAreaHeatmap(area: { minX: number; maxX: number; minZ: number; maxZ: number }): Promise<void> {
+  if (viewportAbortController) viewportAbortController.abort();
+  viewportAbortController = new AbortController();
+
+  const dateFilter = getPlayerDateFilter();
+  setStatus('heatmap-area', 'Rendering heatmap for selected area...');
+  try {
+    const res = await fetch(apiUrl('/api/heatmap/render'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dimension: currentDimension,
+        viewport: area,
+        afterDate: dateFilter.after,
+        beforeDate: dateFilter.before,
+      }),
+      signal: viewportAbortController.signal,
+    });
+    const data: HeatmapRenderResponse = await res.json();
+    setHeatmap(apiUrl(data.url), worldInfo);
+    setHeatmapLegend(data.maxPerChunk, data.totalPlayers);
+    if (data.contoursUrl) {
+      loadContours(data.contoursUrl);
+    }
+  } catch (e: any) {
+    if (e.name !== 'AbortError') {
+      console.warn('Area heatmap render failed:', e);
+    }
+  } finally {
+    viewportAbortController = null;
+    clearStatus('heatmap-area');
+  }
+}
+
 async function renderForViewport(): Promise<void> {
+  // Skip viewport re-rendering when a custom area is active
+  if (getAreaBounds()) return;
+
   const map = getMap();
   const bounds = map.getBounds();
   // Clamp viewport to world bounds so we don't render heatmap for OOB areas

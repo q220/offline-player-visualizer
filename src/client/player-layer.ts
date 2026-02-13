@@ -16,6 +16,7 @@ let viewportCountControl: L.Control | null = null;
 let viewportCountEl: HTMLDivElement | null = null;
 let storedWorldInfo: WorldInfo;
 let extendedBoundsMode = false;
+let areaBoundsOverride: { minX: number; maxX: number; minZ: number; maxZ: number } | null = null;
 
 /** Set to the default 30-day window initially */
 afterFilter = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
@@ -65,6 +66,12 @@ export function setPlayerExtendedBounds(extended: boolean): void {
   refresh();
 }
 
+/** Override viewport clamp with a custom area (or null to restore defaults) */
+export function setAreaBoundsOverride(bounds: { minX: number; maxX: number; minZ: number; maxZ: number } | null): void {
+  areaBoundsOverride = bounds;
+  refresh();
+}
+
 function scheduleRefresh(): void {
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = setTimeout(refresh, 300);
@@ -83,11 +90,12 @@ async function refresh(): Promise<void> {
   const bounds = map.getBounds();
   const zoom = map.getZoom();
 
-  // Clamp viewport to region bounds (or playerBounds when OOB mode is on)
-  // This prevents fetching thousands of out-of-bounds players at wide zoom
-  const clampBounds = extendedBoundsMode && storedWorldInfo.playerBounds
-    ? storedWorldInfo.playerBounds
-    : storedWorldInfo.bounds;
+  // Clamp viewport: area override > OOB extended > region bounds
+  const clampBounds = areaBoundsOverride
+    ? areaBoundsOverride
+    : extendedBoundsMode && storedWorldInfo.playerBounds
+      ? storedWorldInfo.playerBounds
+      : storedWorldInfo.bounds;
 
   const params = new URLSearchParams({
     dimension: currentDimension,
