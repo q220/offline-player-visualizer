@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Minecraft Player Visualizer</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="sidebar">
+        <div class="sidebar-header">
+          <h1>Player Visualizer</h1>
+          <div id="world-info" class="info-box">
+            <div class="info-item">
+              <span class="label">World:</span>
+              <span id="world-name">Loading...</span>
+            </div>
+            <div class="info-item">
+              <span class="label">Version:</span>
+              <span id="mc-version">-</span>
+            </div>
+            <div class="info-item">
+              <span class="label">Players:</span>
+              <span id="player-count">-</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <h2>Search Player</h2>
+          <div class="search-box">
+            <input
+              type="text"
+              id="search-input"
+              placeholder="Search by name or UUID..."
+            />
+            <div id="search-results" class="search-results"></div>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <h2>Dimension</h2>
+          <div id="dimension-toggles" class="toggle-group"></div>
+        </div>
+
+        <div class="sidebar-section">
+          <h2>Layers</h2>
+          <label class="checkbox-label">
+            <input type="checkbox" id="toggle-heatmap" checked />
+            Show Heatmap
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="toggle-blockmap" checked />
+            Show Block Map
+          </label>
+        </div>
+
+        <div class="sidebar-section">
+          <h2>Date Filter</h2>
+          <div class="date-filter">
+            <label>
+              After:
+              <input type="date" id="date-after" />
+            </label>
+            <label>
+              Before:
+              <input type="date" id="date-before" />
+            </label>
+            <button id="apply-date-filter" class="btn">Apply</button>
+            <button id="clear-date-filter" class="btn btn-secondary">
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <h2>Coordinates</h2>
+          <div id="coord-display" class="info-box">
+            <span>Hover over the map</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="map-container">
+        <div id="map"></div>
+        <div id="loading-overlay" class="loading">
+          <div class="loading-content">
+            <div class="spinner"></div>
+            <p>Loading world data...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
