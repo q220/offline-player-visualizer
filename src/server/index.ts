@@ -10,7 +10,7 @@ import { indexPlayers } from './services/player-indexer.js';
 import { playerStore } from './services/player-store.js';
 import { renderBlockMap } from './services/map-renderer.js';
 import { renderHeatmap } from './services/heatmap-renderer.js';
-import { listRegionFiles } from './services/region-loader.js';
+import { listRegionFiles, parseRegionCoords } from './services/region-loader.js';
 import { registerApiRoutes } from './routes/api.js';
 
 async function main() {
@@ -24,7 +24,11 @@ async function main() {
   console.log(`  World: ${worldInfo.name}`);
   console.log(`  MC Version: ${worldInfo.mcVersion}`);
   console.log(`  Dimensions: ${worldInfo.dimensions.join(', ')}`);
-  console.log(`  Player files: ${worldInfo.playerCount}\n`);
+  console.log(`  Player files: ${worldInfo.playerCount}`);
+  if (worldInfo.spawn) {
+    console.log(`  Spawn: ${worldInfo.spawn.x}, ${worldInfo.spawn.z}`);
+  }
+  console.log();
 
   // 2. Try loading player cache, otherwise index fresh
   const cacheFile = path.join(path.resolve(worldPath), '.player-index-cache.json');
@@ -65,18 +69,19 @@ async function main() {
     }
   }
 
-  // 3. Pre-render block maps and heatmaps
-  // Collect all unique dimensions: from world scanner + player data
+  // 3. Collect all dimensions and compute dynamic bounds
   const allDimensions = new Set<string>(worldInfo.dimensions);
   for (const dim of playerStore.getDimensions()) {
     allDimensions.add(dim);
   }
-  // Update worldInfo to include all dimensions
   worldInfo.dimensions = Array.from(allDimensions);
-  console.log(`All dimensions: ${worldInfo.dimensions.join(', ')}\n`);
+  console.log(`All dimensions: ${worldInfo.dimensions.join(', ')}`);
 
+  // Compute bounds from region files + player positions
+  computeDynamicBounds(worldPath, worldInfo);
+
+  // 4. Pre-render block maps and heatmaps
   for (const dimension of worldInfo.dimensions) {
-    // Only render block maps for dimensions that have region files
     const hasRegions = listRegionFiles(worldPath, dimension).length > 0;
     if (hasRegions) {
       try {
@@ -99,7 +104,7 @@ async function main() {
     }
   }
 
-  // 4. Start Fastify server
+  // 5. Start Fastify server
   const app = Fastify({ logger: false });
 
   await app.register(fastifyCors, { origin: true });
@@ -130,6 +135,68 @@ async function main() {
   console.log(`\nServer running at http://localhost:${config.port}`);
   console.log(`  Players loaded: ${playerStore.count}`);
   console.log(`  Dimensions: ${worldInfo.dimensions.join(', ')}`);
+  console.log(`  Bounds: X[${config.bounds.minX}..${config.bounds.maxX}] Z[${config.bounds.minZ}..${config.bounds.maxZ}] (${config.bounds.maxX - config.bounds.minX}x${config.bounds.maxZ - config.bounds.minZ})`);
+}
+
+/**
+ * Compute map bounds from region files and player positions.
+ * Updates config.bounds and worldInfo.bounds to cover everything.
+ */
+function computeDynamicBounds(worldPath: string, worldInfo: import('../shared/protocol.js').WorldInfo): void {
+  let minX = Infinity, maxX = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+
+  // Include region file coverage (each region = 32 chunks = 512 blocks)
+  for (const dim of worldInfo.dimensions) {
+    const regionFiles = listRegionFiles(worldPath, dim);
+    for (const f of regionFiles) {
+      const coords = parseRegionCoords(f);
+      if (coords) {
+        const rMinX = coords.rx * 512;
+        const rMaxX = rMinX + 512;
+        const rMinZ = coords.rz * 512;
+        const rMaxZ = rMinZ + 512;
+        if (rMinX < minX) minX = rMinX;
+        if (rMaxX > maxX) maxX = rMaxX;
+        if (rMinZ < minZ) minZ = rMinZ;
+        if (rMaxZ > maxZ) maxZ = rMaxZ;
+      }
+    }
+  }
+
+  // Include all player positions (with padding)
+  const allPlayers = playerStore.getAll().players;
+  for (const p of allPlayers) {
+    if (p.x < minX) minX = Math.floor(p.x);
+    if (p.x > maxX) maxX = Math.ceil(p.x);
+    if (p.z < minZ) minZ = Math.floor(p.z);
+    if (p.z > maxZ) maxZ = Math.ceil(p.z);
+  }
+
+  // Fallback if no data at all
+  if (!isFinite(minX)) {
+    minX = -500; maxX = 500; minZ = -500; maxZ = 500;
+  }
+
+  // Add padding (5% or at least 50 blocks)
+  const padX = Math.max(50, Math.round((maxX - minX) * 0.05));
+  const padZ = Math.max(50, Math.round((maxZ - minZ) * 0.05));
+  minX -= padX;
+  maxX += padX;
+  minZ -= padZ;
+  maxZ += padZ;
+
+  // Round to chunk boundaries (16 blocks)
+  minX = Math.floor(minX / 16) * 16;
+  maxX = Math.ceil(maxX / 16) * 16;
+  minZ = Math.floor(minZ / 16) * 16;
+  maxZ = Math.ceil(maxZ / 16) * 16;
+
+  console.log(`Dynamic bounds: X[${minX}..${maxX}] Z[${minZ}..${maxZ}] (${maxX - minX}x${maxZ - minZ} pixels)\n`);
+
+  // Update config and worldInfo
+  config.bounds = { minX, maxX, minZ, maxZ };
+  worldInfo.bounds = { minX, maxX, minZ, maxZ };
 }
 
 async function createPlaceholderMap(dimension: string): Promise<void> {
