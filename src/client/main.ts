@@ -41,34 +41,42 @@ async function init(): Promise<void> {
     initPlayerLayer(worldInfo);
     setPlayerDimension(defaultDim);
 
-    // 8. Load players for dot display + auto-zoom to player area
+    // 8. Add spawn point marker if available
+    if (worldInfo.spawn) {
+      const spawnIcon = L.divIcon({
+        className: 'spawn-marker',
+        html: '<div class="spawn-marker-inner"></div>',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8],
+      });
+      const spawnMarker = L.marker(
+        L.latLng(worldInfo.spawn.z, worldInfo.spawn.x),
+        { icon: spawnIcon, zIndexOffset: 1000 },
+      ).addTo(map);
+      spawnMarker.bindPopup(
+        `<div class="player-popup">
+          <div class="popup-name">World Spawn</div>
+          <div class="popup-info">X: ${worldInfo.spawn.x}, Z: ${worldInfo.spawn.z}</div>
+        </div>`,
+      );
+      spawnMarker.bindTooltip('Spawn', {
+        permanent: true,
+        direction: 'top',
+        offset: [0, -10],
+        className: 'spawn-label',
+      });
+    }
+
+    // 9. Load players for dot display
     try {
       const playersRes = await fetch(apiUrl('/api/players?limit=500000'));
       const data: PlayersResponse = await playersRes.json();
       setPlayers(data.players);
-
-      // Auto-zoom to the bounding box of players in the current dimension
-      const dimPlayers = data.players.filter((p) => p.dimension === defaultDim);
-      if (dimPlayers.length > 0) {
-        let pMinX = Infinity, pMaxX = -Infinity, pMinZ = Infinity, pMaxZ = -Infinity;
-        for (const p of dimPlayers) {
-          if (p.x < pMinX) pMinX = p.x;
-          if (p.x > pMaxX) pMaxX = p.x;
-          if (p.z < pMinZ) pMinZ = p.z;
-          if (p.z > pMaxZ) pMaxZ = p.z;
-        }
-        // Pad slightly so dots aren't on the edge
-        const pad = Math.max(20, (pMaxX - pMinX) * 0.05, (pMaxZ - pMinZ) * 0.05);
-        map.fitBounds([
-          [pMinZ - pad, pMinX - pad],
-          [pMaxZ + pad, pMaxX + pad],
-        ]);
-      }
     } catch (e) {
       console.warn('Failed to load player data for dots:', e);
     }
 
-    // 9. Set up coordinate display on hover
+    // 10. Set up coordinate display on hover
     const coordDisplay = document.getElementById('coord-display')!;
     map.on('mousemove', (e: L.LeafletMouseEvent) => {
       const x = Math.round(e.latlng.lng);

@@ -19,6 +19,7 @@ export interface WorldInfo {
     minZ: number;
     maxZ: number;
   };
+  spawn?: { x: number; z: number };
 }
 
 export interface PlayersResponse {

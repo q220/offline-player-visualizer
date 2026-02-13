@@ -14,6 +14,7 @@ export async function scanWorld(worldPath: string): Promise<WorldInfo> {
   // Read level.dat
   let name = path.basename(absPath);
   let mcVersion = 'unknown';
+  let spawn: { x: number; z: number } | undefined;
 
   const levelDatPath = path.join(absPath, 'level.dat');
   if (fs.existsSync(levelDatPath)) {
@@ -24,6 +25,11 @@ export async function scanWorld(worldPath: string): Promise<WorldInfo> {
       if (data) {
         name = data.LevelName?.value || name;
         mcVersion = data.Version?.value?.Name?.value || 'unknown';
+        const spawnX = data.SpawnX?.value;
+        const spawnZ = data.SpawnZ?.value;
+        if (typeof spawnX === 'number' && typeof spawnZ === 'number') {
+          spawn = { x: spawnX, z: spawnZ };
+        }
       }
     } catch (e) {
       console.warn('Failed to parse level.dat:', e);
@@ -65,6 +71,7 @@ export async function scanWorld(worldPath: string): Promise<WorldInfo> {
     dimensions: dimensions.length > 0 ? dimensions : [DIMENSIONS[0]],
     playerCount,
     bounds: { ...DEFAULT_BOUNDS },
+    spawn,
   };
 }
 
