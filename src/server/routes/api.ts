@@ -128,14 +128,15 @@ export async function registerApiRoutes(
   app.post<{
     Body: HeatmapRenderRequest;
   }>('/api/heatmap/render', async (req) => {
-    const { dimension, afterDate, beforeDate, viewport } = req.body;
+    const { dimension, afterDate, beforeDate, viewport, renderBounds } = req.body;
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const parts = [dimension];
     if (afterDate) parts.push(`after=${new Date(afterDate).toISOString().slice(0, 10)}`);
     if (beforeDate) parts.push(`before=${new Date(beforeDate).toISOString().slice(0, 10)}`);
     if (viewport) parts.push(`viewport=[${viewport.minX}..${viewport.maxX}, ${viewport.minZ}..${viewport.maxZ}]`);
+    if (renderBounds) parts.push(`renderBounds=[${renderBounds.minX}..${renderBounds.maxX}, ${renderBounds.minZ}..${renderBounds.maxZ}]`);
     console.log(`\nHeatmap render request: ${parts.join(', ')}`);
-    const result = await renderHeatmap(dimension, { afterDate, beforeDate, viewport, id });
+    const result = await renderHeatmap(dimension, { afterDate, beforeDate, viewport, renderBounds, id });
     return {
       url: result.url,
       contoursUrl: result.contoursUrl,

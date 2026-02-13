@@ -35,9 +35,10 @@ export async function renderHeatmap(
     beforeDate?: number;
     id?: string;
     viewport?: { minX: number; maxX: number; minZ: number; maxZ: number };
+    renderBounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
   },
 ): Promise<HeatmapResult> {
-  const { minX, maxX, minZ, maxZ } = config.bounds;
+  const { minX, maxX, minZ, maxZ } = opts?.renderBounds || config.bounds;
 
   // Chunk-resolution dimensions
   const chunkW = Math.ceil((maxX - minX) / CHUNK_SIZE);

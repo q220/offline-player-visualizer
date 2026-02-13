@@ -51,6 +51,13 @@ export interface HeatmapRenderRequest {
     minZ: number;
     maxZ: number;
   };
+  /** Custom render bounds — when provided, the heatmap PNG covers only this area */
+  renderBounds?: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
 }
 
 export interface HeatmapRenderResponse {

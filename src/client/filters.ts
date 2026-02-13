@@ -292,6 +292,7 @@ async function renderAreaHeatmap(area: { minX: number; maxX: number; minZ: numbe
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         dimension: currentDimension,
+        renderBounds: area,
         viewport: area,
         afterDate: dateFilter.after,
         beforeDate: dateFilter.before,
@@ -299,7 +300,8 @@ async function renderAreaHeatmap(area: { minX: number; maxX: number; minZ: numbe
       signal: viewportAbortController.signal,
     });
     const data: HeatmapRenderResponse = await res.json();
-    setHeatmap(apiUrl(data.url), worldInfo);
+    // Place overlay at the area bounds (not world bounds) since the PNG covers only the area
+    setHeatmap(apiUrl(data.url), worldInfo, area);
     setHeatmapLegend(data.maxPerChunk, data.totalPlayers);
     if (data.contoursUrl) {
       loadContours(data.contoursUrl);

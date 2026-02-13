@@ -152,8 +152,9 @@ export function setBlockMap(dimension: string, _worldInfo: WorldInfo): void {
 export function setHeatmap(
   url: string,
   worldInfo: WorldInfo,
+  customBounds?: { minX: number; maxX: number; minZ: number; maxZ: number },
 ): void {
-  const { minX, maxX, minZ, maxZ } = worldInfo.bounds;
+  const { minX, maxX, minZ, maxZ } = customBounds || worldInfo.bounds;
   const bounds: L.LatLngBoundsExpression = [
     [minZ, minX],
     [maxZ, maxX],
