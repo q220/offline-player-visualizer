@@ -155,20 +155,24 @@ export async function renderHeatmap(
     return emptyResult;
   }
 
-  // Map to RGBA
+  // Map to RGBA — flip vertically so row 0 = maxZ (Leaflet imageOverlay
+  // maps the top of the image to the northeast / maxZ corner)
   t1 = performance.now();
   const pixels = Buffer.alloc(chunkW * chunkH * 4);
   let coloredPixels = 0;
 
-  for (let i = 0; i < blurred.length; i++) {
-    const val = blurred[i] / maxBlurred;
-    const [r, g, b, a] = heatmapColor(val);
-    const idx = i * 4;
-    pixels[idx] = r;
-    pixels[idx + 1] = g;
-    pixels[idx + 2] = b;
-    pixels[idx + 3] = a;
-    if (a > 0) coloredPixels++;
+  for (let cz = 0; cz < chunkH; cz++) {
+    const dstRow = chunkH - 1 - cz; // flip: minZ data → bottom of image
+    for (let cx = 0; cx < chunkW; cx++) {
+      const val = blurred[cz * chunkW + cx] / maxBlurred;
+      const [r, g, b, a] = heatmapColor(val);
+      const idx = (dstRow * chunkW + cx) * 4;
+      pixels[idx] = r;
+      pixels[idx + 1] = g;
+      pixels[idx + 2] = b;
+      pixels[idx + 3] = a;
+      if (a > 0) coloredPixels++;
+    }
   }
 
   console.log(`  Color map: ${coloredPixels} colored pixels (${(performance.now() - t1).toFixed(0)}ms)`);

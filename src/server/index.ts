@@ -104,18 +104,43 @@ async function main() {
   // 5. Start Fastify server
   const app = Fastify({ logger: false });
 
-  // Request logging with timing
+  // Request logging with timing — tile requests are aggregated to avoid noise
+  let tileStats = { count: 0, errors: 0, totalMs: 0 };
+  let tileFlushTimer: ReturnType<typeof setInterval> | null = null;
+
+  function flushTileStats(): void {
+    if (tileStats.count === 0) return;
+    const avg = (tileStats.totalMs / tileStats.count).toFixed(1);
+    const errStr = tileStats.errors > 0 ? `, ${tileStats.errors} errors` : '';
+    console.log(`  [tiles] ${tileStats.count} served (avg ${avg}ms${errStr})`);
+    tileStats = { count: 0, errors: 0, totalMs: 0 };
+  }
+
   app.addHook('onRequest', (req, _reply, done) => {
     (req as any)._startTime = performance.now();
     done();
   });
   app.addHook('onResponse', (req, reply, done) => {
     const start = (req as any)._startTime as number;
-    const ms = (performance.now() - start).toFixed(1);
+    const ms = performance.now() - start;
     const url = req.url;
-    // Skip noisy static/asset requests, only log API calls and tiles
-    if (url.startsWith('/api/')) {
-      console.log(`  ${req.method} ${url} → ${reply.statusCode} (${ms}ms)`);
+
+    if (url.startsWith('/api/tiles/')) {
+      // Aggregate tile requests into periodic summaries
+      tileStats.count++;
+      tileStats.totalMs += ms;
+      if (reply.statusCode >= 400) tileStats.errors++;
+      if (!tileFlushTimer) {
+        tileFlushTimer = setInterval(() => {
+          flushTileStats();
+          if (tileStats.count === 0) {
+            clearInterval(tileFlushTimer!);
+            tileFlushTimer = null;
+          }
+        }, 3000);
+      }
+    } else if (url.startsWith('/api/')) {
+      console.log(`  ${req.method} ${url} → ${reply.statusCode} (${ms.toFixed(1)}ms)`);
     }
     done();
   });
