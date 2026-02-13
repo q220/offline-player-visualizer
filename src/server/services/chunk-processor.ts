@@ -39,31 +39,39 @@ export function extractTopBlocks(chunk: any): Uint8Array {
     // Inspect raw sections
     if (Array.isArray(chunk.sections)) {
       console.log(`  [debug] Number of sections: ${chunk.sections.length}`);
-      for (let i = 0; i < chunk.sections.length; i++) {
+      for (let i = 0; i < Math.min(chunk.sections.length, 8); i++) {
         const sec = chunk.sections[i];
-        if (sec) {
-          const keys = Object.keys(sec).join(', ');
-          const hasData = sec.data || sec.blockStates || sec.palette;
-          console.log(`  [debug] Section ${i}: keys=[${keys}] hasData=${!!hasData}`);
-          if (sec.palette) {
-            console.log(`  [debug]   palette length: ${sec.palette.length}, first entries:`, sec.palette.slice(0, 3));
+        if (!sec) continue;
+        console.log(`  [debug] Section ${i}: solidBlockCount=${sec.solidBlockCount}`);
+        if (sec.palette) {
+          const names = sec.palette.map((p: any) => {
+            if (typeof p === 'number') return `stateId:${p}`;
+            if (typeof p === 'string') return p;
+            if (p?.name) return p.name;
+            if (p?.Name) return p.Name;
+            if (p?.value?.Name?.value) return p.value.Name.value;
+            return JSON.stringify(p).slice(0, 80);
+          });
+          console.log(`  [debug]   palette(${sec.palette.length}):`, names.slice(0, 8));
+        }
+        if (sec.data) {
+          console.log(`  [debug]   data type: ${sec.data.constructor?.name}, keys: ${Object.keys(sec.data).slice(0,8)}`);
+          // Try to read raw values
+          if (sec.data.get) {
+            const vals = [];
+            for (let j = 0; j < Math.min(10, 4096); j++) {
+              vals.push(sec.data.get(j));
+            }
+            console.log(`  [debug]   data.get(0..9):`, vals);
           }
-          if (sec.data) {
-            const nonZero = sec.data.some ? sec.data.some((v: number) => v !== 0) : false;
-            console.log(`  [debug]   data length: ${sec.data.length}, hasNonZero: ${nonZero}`);
-          }
-          if (sec.blockStates) {
-            console.log(`  [debug]   blockStates type: ${typeof sec.blockStates}, keys: ${Object.keys(sec.blockStates).join(', ')}`);
-          }
-          // Try getBlock on this section's y range
-          try {
-            const sectionY = chunk.minY + i * 16;
-            const b = chunk.getBlock(new Vec3(0, sectionY, 0));
-            console.log(`  [debug]   getBlock(0,${sectionY},0) = ${b?.name} stateId=${b?.stateId}`);
-          } catch (e: any) {
-            console.log(`  [debug]   getBlock error: ${e.message}`);
-          }
-          if (i >= 5) { console.log('  [debug]   ... (truncated)'); break; }
+        }
+        // Also try getBlockStateId directly
+        try {
+          const sectionY = chunk.minY + i * 16;
+          const sid = chunk.getBlockStateId(new Vec3(0, sectionY, 0));
+          console.log(`  [debug]   getBlockStateId(0,${sectionY},0) = ${sid}`);
+        } catch (e: any) {
+          console.log(`  [debug]   getBlockStateId error: ${e.message}`);
         }
       }
     }
