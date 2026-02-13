@@ -11,7 +11,7 @@ import {
   toggleExtendedBounds,
   getMap,
 } from './map';
-import { setPlayerDimension, setPlayerDateFilter, getPlayerDateFilter } from './player-layer';
+import { setPlayerDimension, setPlayerDateFilter, getPlayerDateFilter, setPlayerExtendedBounds } from './player-layer';
 import { dimensionSlug } from '../shared/constants';
 import { setStatus, clearStatus } from './status';
 
@@ -77,6 +77,7 @@ export function initFilters(info: WorldInfo): void {
     }
     toggleOobEl.addEventListener('change', () => {
       toggleExtendedBounds(toggleOobEl.checked);
+      setPlayerExtendedBounds(toggleOobEl.checked);
     });
   }
 
@@ -245,11 +246,13 @@ function scheduleViewportRender(): void {
 async function renderForViewport(): Promise<void> {
   const map = getMap();
   const bounds = map.getBounds();
+  // Clamp viewport to world bounds so we don't render heatmap for OOB areas
+  const wb = worldInfo.bounds;
   const viewport = {
-    minX: Math.floor(bounds.getWest()),
-    maxX: Math.ceil(bounds.getEast()),
-    minZ: Math.floor(bounds.getSouth()),
-    maxZ: Math.ceil(bounds.getNorth()),
+    minX: Math.floor(Math.max(bounds.getWest(), wb.minX)),
+    maxX: Math.ceil(Math.min(bounds.getEast(), wb.maxX)),
+    minZ: Math.floor(Math.max(bounds.getSouth(), wb.minZ)),
+    maxZ: Math.ceil(Math.min(bounds.getNorth(), wb.maxZ)),
   };
 
   // Skip if viewport covers nearly the entire world (result ≈ startup heatmap)
