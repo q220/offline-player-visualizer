@@ -55,8 +55,10 @@ export async function renderHeatmap(
     players = players.filter((p) => p.lastModified <= before);
   }
 
+  const t0 = performance.now();
+  const label = opts?.id ? `[filtered ${opts.id}]` : '[startup]';
   console.log(
-    `Rendering heatmap for ${dimensionSlug(dimension)}: ${players.length} players (${chunkW}x${chunkH} chunks)`,
+    `Heatmap ${label} ${dimensionSlug(dimension)}: ${players.length} players, ${chunkW}x${chunkH} chunks (${(chunkW * chunkH / 1000).toFixed(0)}k cells)`,
   );
 
   const emptyResult: HeatmapResult = {
@@ -73,6 +75,7 @@ export async function renderHeatmap(
   }
 
   // Build chunk-resolution density grid
+  let t1 = performance.now();
   const density = new Float32Array(chunkW * chunkH);
   let inBoundsCount = 0;
 
@@ -85,7 +88,7 @@ export async function renderHeatmap(
     }
   }
 
-  console.log(`  ${inBoundsCount}/${players.length} players within map bounds`);
+  console.log(`  Density grid: ${inBoundsCount}/${players.length} in bounds (${(performance.now() - t1).toFixed(0)}ms)`);
 
   if (inBoundsCount === 0) {
     const pixels = Buffer.alloc(chunkW * chunkH * 4);
@@ -95,45 +98,35 @@ export async function renderHeatmap(
 
   // Find max density (players per chunk)
   let maxDensity = 0;
+  let nonZeroChunks = 0;
   for (let i = 0; i < density.length; i++) {
+    if (density[i] > 0) nonZeroChunks++;
     if (density[i] > maxDensity) maxDensity = density[i];
   }
-  // Density distribution diagnostics
-  let nonZeroChunks = 0;
-  let onePlayerChunks = 0;
-  const densityBuckets = [0, 0, 0, 0, 0]; // 1, 2-5, 6-10, 11-50, 50+
-  for (let i = 0; i < density.length; i++) {
-    if (density[i] > 0) {
-      nonZeroChunks++;
-      if (density[i] === 1) { onePlayerChunks++; densityBuckets[0]++; }
-      else if (density[i] <= 5) densityBuckets[1]++;
-      else if (density[i] <= 10) densityBuckets[2]++;
-      else if (density[i] <= 50) densityBuckets[3]++;
-      else densityBuckets[4]++;
-    }
-  }
-  console.log(`  Max density: ${maxDensity} players/chunk`);
-  console.log(`  Non-zero chunks: ${nonZeroChunks}/${chunkW * chunkH} (${(nonZeroChunks / (chunkW * chunkH) * 100).toFixed(1)}%)`);
-  console.log(`  Distribution: 1p=${densityBuckets[0]} 2-5p=${densityBuckets[1]} 6-10p=${densityBuckets[2]} 11-50p=${densityBuckets[3]} 50+p=${densityBuckets[4]}`);
+  console.log(`  Max density: ${maxDensity}/chunk, ${nonZeroChunks} active chunks`);
 
   // Copy raw density for contour extraction (before transforms)
   const rawDensity = new Float32Array(density);
 
   // Apply sqrt scale (gentler than log — preserves low-density detail)
+  t1 = performance.now();
   const sqrtMax = Math.sqrt(maxDensity);
   for (let i = 0; i < density.length; i++) {
     if (density[i] > 0) {
       density[i] = Math.sqrt(density[i]) / sqrtMax;
     }
   }
+  console.log(`  Sqrt scale (${(performance.now() - t1).toFixed(0)}ms)`);
 
   // Blur — scale with world size, not just density
   // Sparse data needs a wide kernel to create meaningful gradients
+  t1 = performance.now();
   const worldDiag = Math.sqrt(chunkW * chunkW + chunkH * chunkH);
   const blurSigma = Math.max(6, Math.min(30, Math.round(worldDiag / 25)));
-  console.log(`  Blur sigma: ${blurSigma} (chunk resolution, world diagonal ${Math.round(worldDiag)} chunks)`);
+  console.log(`  Blur sigma: ${blurSigma} (diagonal ${Math.round(worldDiag)} chunks)...`);
 
   const blurred = gaussianBlurFloat32(density, chunkW, chunkH, blurSigma);
+  console.log(`  Gaussian blur (${(performance.now() - t1).toFixed(0)}ms)`);
 
   // Normalize — if viewport is given, normalize to the viewport area only
   let maxBlurred = 0;
@@ -163,6 +156,7 @@ export async function renderHeatmap(
   }
 
   // Map to RGBA
+  t1 = performance.now();
   const pixels = Buffer.alloc(chunkW * chunkH * 4);
   let coloredPixels = 0;
 
@@ -177,17 +171,27 @@ export async function renderHeatmap(
     if (a > 0) coloredPixels++;
   }
 
-  console.log(`  Heatmap: ${coloredPixels}/${chunkW * chunkH} colored pixels (${(coloredPixels / (chunkW * chunkH) * 100).toFixed(1)}%)`);
+  console.log(`  Color map: ${coloredPixels} colored pixels (${(performance.now() - t1).toFixed(0)}ms)`);
 
+  t1 = performance.now();
   const url = await writeHeatmapPng(pixels, chunkW, chunkH, dimension, opts?.id);
+  console.log(`  PNG write (${(performance.now() - t1).toFixed(0)}ms)`);
 
   // Generate contour lines from blurred raw density
+  t1 = performance.now();
   const contourSigma = Math.max(3, blurSigma);
   const rawBlurred = gaussianBlurFloat32(rawDensity, chunkW, chunkH, contourSigma);
+  console.log(`  Contour blur (${(performance.now() - t1).toFixed(0)}ms)`);
+
+  t1 = performance.now();
   const contourLevels = computeNiceLevels(maxDensity);
   const contours = extractContours(rawBlurred, chunkW, chunkH, contourLevels, minX, minZ);
   const contoursUrl = await writeContourJson(contours, dimension, opts?.id);
-  console.log(`  Contours: ${contourLevels.length} levels [${contourLevels.join(', ')}], ${contours.levels.reduce((s, l) => s + l.lines.length, 0)} polylines`);
+  const totalPolylines = contours.levels.reduce((s, l) => s + l.lines.length, 0);
+  console.log(`  Contours: ${contourLevels.length} levels, ${totalPolylines} polylines (${(performance.now() - t1).toFixed(0)}ms)`);
+
+  const totalMs = (performance.now() - t0).toFixed(0);
+  console.log(`  Heatmap complete in ${totalMs}ms`);
 
   return { url, contoursUrl, maxPerChunk: maxDensity, totalPlayers: inBoundsCount };
 }
@@ -276,7 +280,6 @@ async function writeHeatmapPng(
   await sharp(pixels, { raw: { width, height, channels: 4 } })
     .png()
     .toFile(outPath);
-  console.log(`Heatmap saved: ${outPath} (${width}x${height})`);
   return `/static/${filename}`;
 }
 
@@ -409,41 +412,47 @@ function connectSegments(
     if (used.has(i)) continue;
     used.add(i);
 
-    const polyline: [number, number][] = [segments[i][0], segments[i][1]];
+    const tail: [number, number][] = [segments[i][0], segments[i][1]];
 
     // Extend tail
     let extended = true;
     while (extended) {
       extended = false;
-      const tail = polyline[polyline.length - 1];
-      const neighbors = adj.get(key(tail)) || [];
+      const end = tail[tail.length - 1];
+      const neighbors = adj.get(key(end)) || [];
       for (const j of neighbors) {
         if (used.has(j)) continue;
         used.add(j);
         const [a, b] = segments[j];
-        polyline.push(key(a) === key(tail) ? b : a);
+        tail.push(key(a) === key(end) ? b : a);
         extended = true;
         break;
       }
     }
 
-    // Extend head
+    // Extend head — collect in separate array then reverse+concat (avoids O(n²) unshift)
+    const head: [number, number][] = [];
     extended = true;
     while (extended) {
       extended = false;
-      const head = polyline[0];
-      const neighbors = adj.get(key(head)) || [];
+      const front = head.length > 0 ? head[head.length - 1] : tail[0];
+      const neighbors = adj.get(key(front)) || [];
       for (const j of neighbors) {
         if (used.has(j)) continue;
         used.add(j);
         const [a, b] = segments[j];
-        polyline.unshift(key(a) === key(head) ? b : a);
+        head.push(key(a) === key(front) ? b : a);
         extended = true;
         break;
       }
     }
 
-    polylines.push(polyline);
+    if (head.length > 0) {
+      head.reverse();
+      polylines.push([...head, ...tail]);
+    } else {
+      polylines.push(tail);
+    }
   }
 
   return polylines;
@@ -499,7 +508,6 @@ async function writeContourJson(
   const filename = id ? `contours-filtered-${id}.json` : `contours-${slug}.json`;
   const outPath = path.join(outDir, filename);
   fs.writeFileSync(outPath, JSON.stringify(data));
-  console.log(`  Contours saved: ${outPath}`);
   return `/static/${filename}`;
 }
 

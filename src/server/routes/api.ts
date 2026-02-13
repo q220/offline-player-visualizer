@@ -130,6 +130,11 @@ export async function registerApiRoutes(
   }>('/api/heatmap/render', async (req) => {
     const { dimension, afterDate, beforeDate, viewport } = req.body;
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const parts = [dimension];
+    if (afterDate) parts.push(`after=${new Date(afterDate).toISOString().slice(0, 10)}`);
+    if (beforeDate) parts.push(`before=${new Date(beforeDate).toISOString().slice(0, 10)}`);
+    if (viewport) parts.push(`viewport=[${viewport.minX}..${viewport.maxX}, ${viewport.minZ}..${viewport.maxZ}]`);
+    console.log(`\nHeatmap render request: ${parts.join(', ')}`);
     const result = await renderHeatmap(dimension, { afterDate, beforeDate, viewport, id });
     return {
       url: result.url,

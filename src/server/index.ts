@@ -104,6 +104,22 @@ async function main() {
   // 5. Start Fastify server
   const app = Fastify({ logger: false });
 
+  // Request logging with timing
+  app.addHook('onRequest', (req, _reply, done) => {
+    (req as any)._startTime = performance.now();
+    done();
+  });
+  app.addHook('onResponse', (req, reply, done) => {
+    const start = (req as any)._startTime as number;
+    const ms = (performance.now() - start).toFixed(1);
+    const url = req.url;
+    // Skip noisy static/asset requests, only log API calls and tiles
+    if (url.startsWith('/api/')) {
+      console.log(`  ${req.method} ${url} → ${reply.statusCode} (${ms}ms)`);
+    }
+    done();
+  });
+
   await app.register(fastifyCors, { origin: true });
   await app.register(fastifyCompress);
 
