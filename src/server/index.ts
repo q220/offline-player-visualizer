@@ -10,7 +10,7 @@ import { indexPlayers } from './services/player-indexer.js';
 import { playerStore } from './services/player-store.js';
 import { renderHeatmap } from './services/heatmap-renderer.js';
 import { preRenderTiles } from './services/map-renderer.js';
-import { listRegionFiles, findConnectedRegions, type RegionInfo } from './services/region-loader.js';
+import { listRegionFiles, findConnectedRegions, scanRegions, type RegionInfo } from './services/region-loader.js';
 import { registerApiRoutes } from './routes/api.js';
 import { DEFAULT_PLAYER_DAYS } from '../shared/protocol.js';
 
@@ -103,15 +103,16 @@ async function main() {
     }
   }
 
-  // 5. Pre-render block map tiles
+  // 5. Pre-render block map tiles (ALL regions, not just connected)
   for (const dimension of worldInfo.dimensions) {
-    const regions = dimensionRegions.get(dimension);
-    if (!regions || regions.length === 0) continue;
+    const allRegions = scanRegions(worldPath, dimension);
+    if (allRegions.length === 0) continue;
 
+    const connected = dimensionRegions.get(dimension);
     const t0 = performance.now();
-    console.log(`Pre-rendering tiles for ${dimension} (${regions.length} regions)...`);
+    console.log(`Pre-rendering tiles for ${dimension} (${allRegions.length} regions, ${connected?.length ?? 0} connected)...`);
 
-    const stats = await preRenderTiles(worldPath, dimension, regions, (done, total) => {
+    const stats = await preRenderTiles(worldPath, dimension, allRegions, (done, total) => {
       process.stdout.write(`\r  Tiles: ${done}/${total}`);
     });
     process.stdout.write('\n');
