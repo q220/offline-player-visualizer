@@ -3,6 +3,7 @@ import path from 'path';
 import sharp from 'sharp';
 import { loadChunkColumnData } from './raw-chunk-reader.js';
 import { dimensionSlug } from '../../shared/constants.js';
+import type { RegionInfo } from './region-loader.js';
 
 /**
  * Heightmap shading constants (Dynmap-style).
@@ -186,20 +187,36 @@ async function renderRegionPixels(
   return pixels;
 }
 
-// Legacy export — no longer pre-renders, tiles are rendered on demand via API
-export async function renderBlockMap(
-  _worldPath: string,
+/**
+ * Pre-render all tiles for a dimension's regions at startup.
+ * Skips tiles already cached on disk, so repeat startups are fast.
+ */
+export async function preRenderTiles(
+  worldPath: string,
   dimension: string,
-  _mcVersion: string,
-): Promise<string> {
-  const slug = dimensionSlug(dimension);
-  const cacheDir = path.join(TILE_CACHE_DIR, slug);
-  fs.mkdirSync(cacheDir, { recursive: true });
+  regions: RegionInfo[],
+  onProgress: (done: number, total: number) => void,
+): Promise<{ rendered: number; cached: number; failed: number }> {
+  const stats = { rendered: 0, cached: 0, failed: 0 };
 
-  const cachedCount = fs.existsSync(cacheDir)
-    ? fs.readdirSync(cacheDir).filter(f => f.endsWith('.png')).length
-    : 0;
-  console.log(`  Tiles for ${slug}: on-demand rendering (${cachedCount} cached)`);
+  for (let i = 0; i < regions.length; i++) {
+    const r = regions[i];
+    const tx = r.rx;
+    const ty = -r.rz - 1;
 
-  return `/api/tiles/${slug}/`;
+    if (isTileCached(dimension, tx, ty)) {
+      stats.cached++;
+    } else {
+      try {
+        await renderTile(worldPath, dimension, tx, ty);
+        stats.rendered++;
+      } catch {
+        stats.failed++;
+      }
+    }
+
+    onProgress(i + 1, regions.length);
+  }
+
+  return stats;
 }
