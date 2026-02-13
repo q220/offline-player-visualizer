@@ -10,6 +10,7 @@ import { indexPlayers } from './services/player-indexer.js';
 import { playerStore } from './services/player-store.js';
 import { renderBlockMap } from './services/map-renderer.js';
 import { renderHeatmap } from './services/heatmap-renderer.js';
+import { listRegionFiles } from './services/region-loader.js';
 import { registerApiRoutes } from './routes/api.js';
 
 async function main() {
@@ -64,14 +65,29 @@ async function main() {
     }
   }
 
-  // 3. Pre-render block maps and heatmaps for each dimension
+  // 3. Pre-render block maps and heatmaps
+  // Collect all unique dimensions: from world scanner + player data
+  const allDimensions = new Set<string>(worldInfo.dimensions);
+  for (const dim of playerStore.getDimensions()) {
+    allDimensions.add(dim);
+  }
+  // Update worldInfo to include all dimensions
+  worldInfo.dimensions = Array.from(allDimensions);
+  console.log(`All dimensions: ${worldInfo.dimensions.join(', ')}\n`);
+
   for (const dimension of worldInfo.dimensions) {
-    try {
-      console.log(`Rendering block map for ${dimension}...`);
-      await renderBlockMap(worldPath, dimension, worldInfo.mcVersion);
-    } catch (e) {
-      console.error(`  Failed to render block map for ${dimension}:`, e);
-      // Create a placeholder dark image
+    // Only render block maps for dimensions that have region files
+    const hasRegions = listRegionFiles(worldPath, dimension).length > 0;
+    if (hasRegions) {
+      try {
+        console.log(`Rendering block map for ${dimension}...`);
+        await renderBlockMap(worldPath, dimension, worldInfo.mcVersion);
+      } catch (e) {
+        console.error(`  Failed to render block map for ${dimension}:`, e);
+        await createPlaceholderMap(dimension);
+      }
+    } else {
+      console.log(`No region files for ${dimension}, creating placeholder map`);
       await createPlaceholderMap(dimension);
     }
 

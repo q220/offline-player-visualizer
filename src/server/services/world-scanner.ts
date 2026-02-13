@@ -80,11 +80,24 @@ function hasRegionFiles(dir: string): boolean {
 export function getRegionDir(worldPath: string, dimension: string): string {
   const absPath = path.resolve(worldPath);
   switch (dimension) {
+    case 'minecraft:overworld':
+      return path.join(absPath, 'region');
     case 'minecraft:the_nether':
       return path.join(absPath, 'DIM-1', 'region');
     case 'minecraft:the_end':
       return path.join(absPath, 'DIM1', 'region');
-    default:
-      return path.join(absPath, 'region');
+    default: {
+      // Custom dimensions: check world/dimensions/namespace/name/region/
+      const dimName = dimension.replace('minecraft:', '');
+      const customPath = path.join(absPath, 'dimensions', 'minecraft', dimName, 'region');
+      if (fs.existsSync(customPath)) return customPath;
+      // Fallback: check for Bukkit-style world_dimname/region/ in parent
+      const parentDir = path.dirname(absPath);
+      const worldName = path.basename(absPath);
+      const bukkitPath = path.join(parentDir, `${worldName}_${dimName}`, 'region');
+      if (fs.existsSync(bukkitPath)) return bukkitPath;
+      // Last resort: return the custom path even if it doesn't exist
+      return customPath;
+    }
   }
 }

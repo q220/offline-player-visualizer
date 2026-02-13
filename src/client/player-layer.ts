@@ -5,7 +5,7 @@ declare const L: typeof import('leaflet');
 
 let clusterLayer: L.LayerGroup;
 let allPlayers: PlayerRecord[] = [];
-let currentDimension = 'minecraft:overworld';
+let currentDimension = '';
 
 export function initPlayerLayer(worldInfo: WorldInfo): void {
   const map = getMap();

@@ -6,6 +6,7 @@ import {
   toggleHeatmapVisibility,
   toggleBlockMapVisibility,
 } from './map';
+import { setPlayerDimension } from './player-layer';
 import { dimensionSlug } from '../shared/constants';
 
 let currentDimension = 'minecraft:overworld';
@@ -13,6 +14,11 @@ let worldInfo: WorldInfo;
 
 export function initFilters(info: WorldInfo): void {
   worldInfo = info;
+
+  // Set current dimension: prefer overworld, fall back to first
+  currentDimension = info.dimensions.includes('minecraft:overworld')
+    ? 'minecraft:overworld'
+    : info.dimensions[0] || 'minecraft:overworld';
 
   // Dimension toggles
   const container = document.getElementById('dimension-toggles')!;
@@ -33,16 +39,6 @@ export function initFilters(info: WorldInfo): void {
     });
 
     container.appendChild(btn);
-  }
-
-  // If current dimension not in list, switch to first
-  if (
-    !info.dimensions.includes(currentDimension) &&
-    info.dimensions.length > 0
-  ) {
-    currentDimension = info.dimensions[0];
-    const firstBtn = container.querySelector('.toggle-btn');
-    firstBtn?.classList.add('active');
   }
 
   // Layer toggles
@@ -102,6 +98,7 @@ export function initFilters(info: WorldInfo): void {
 function setDimension(dim: string): void {
   currentDimension = dim;
   setBlockMap(dim, worldInfo);
+  setPlayerDimension(dim);
   const slug = dimensionSlug(dim);
   setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
 }
