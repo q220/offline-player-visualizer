@@ -36,6 +36,38 @@ export function extractTopBlocks(chunk: any): Uint8Array {
       }
     }
 
+    // Inspect raw sections
+    if (Array.isArray(chunk.sections)) {
+      console.log(`  [debug] Number of sections: ${chunk.sections.length}`);
+      for (let i = 0; i < chunk.sections.length; i++) {
+        const sec = chunk.sections[i];
+        if (sec) {
+          const keys = Object.keys(sec).join(', ');
+          const hasData = sec.data || sec.blockStates || sec.palette;
+          console.log(`  [debug] Section ${i}: keys=[${keys}] hasData=${!!hasData}`);
+          if (sec.palette) {
+            console.log(`  [debug]   palette length: ${sec.palette.length}, first entries:`, sec.palette.slice(0, 3));
+          }
+          if (sec.data) {
+            const nonZero = sec.data.some ? sec.data.some((v: number) => v !== 0) : false;
+            console.log(`  [debug]   data length: ${sec.data.length}, hasNonZero: ${nonZero}`);
+          }
+          if (sec.blockStates) {
+            console.log(`  [debug]   blockStates type: ${typeof sec.blockStates}, keys: ${Object.keys(sec.blockStates).join(', ')}`);
+          }
+          // Try getBlock on this section's y range
+          try {
+            const sectionY = chunk.minY + i * 16;
+            const b = chunk.getBlock(new Vec3(0, sectionY, 0));
+            console.log(`  [debug]   getBlock(0,${sectionY},0) = ${b?.name} stateId=${b?.stateId}`);
+          } catch (e: any) {
+            console.log(`  [debug]   getBlock error: ${e.message}`);
+          }
+          if (i >= 5) { console.log('  [debug]   ... (truncated)'); break; }
+        }
+      }
+    }
+
     // Try to find ANY non-air block
     let found = false;
     for (let y = 319; y >= -64 && !found; y--) {
@@ -44,7 +76,7 @@ export function extractTopBlocks(chunk: any): Uint8Array {
           try {
             const b = chunk.getBlock(new Vec3(x, y, z));
             if (b && b.name !== 'air' && b.name !== 'cave_air' && b.name !== 'void_air') {
-              console.log(`  [debug] Found block at ${x},${y},${z}: ${b.name}`);
+              console.log(`  [debug] Found block at ${x},${y},${z}: ${b.name} stateId=${b.stateId}`);
               found = true;
             }
           } catch {
