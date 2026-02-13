@@ -80,20 +80,18 @@ async function main() {
   // Compute bounds from region files + player positions
   computeDynamicBounds(worldPath, worldInfo);
 
-  // 4. Pre-render block maps and heatmaps
+  // 4. Pre-render block map tiles and heatmaps
   for (const dimension of worldInfo.dimensions) {
     const hasRegions = listRegionFiles(worldPath, dimension).length > 0;
     if (hasRegions) {
       try {
-        console.log(`Rendering block map for ${dimension}...`);
+        console.log(`Rendering tiles for ${dimension}...`);
         await renderBlockMap(worldPath, dimension, worldInfo.mcVersion);
       } catch (e) {
-        console.error(`  Failed to render block map for ${dimension}:`, e);
-        await createPlaceholderMap(dimension);
+        console.error(`  Failed to render tiles for ${dimension}:`, e);
       }
     } else {
-      console.log(`No region files for ${dimension}, creating placeholder map`);
-      await createPlaceholderMap(dimension);
+      console.log(`No region files for ${dimension}, skipping tile render`);
     }
 
     try {
@@ -146,7 +144,13 @@ function computeDynamicBounds(worldPath: string, worldInfo: import('../shared/pr
   let minX = Infinity, maxX = -Infinity;
   let minZ = Infinity, maxZ = -Infinity;
 
+  // Sharp pixel limit is ~268M pixels. Cap to 16384x16384 = 268M to stay safe.
+  // Memory: 16384^2 * 4 bytes = 1GB for pixel buffer alone, so use a practical cap.
+  const MAX_MAP_SIZE = 10000; // 10000x10000 = 100M pixels, ~400MB pixel buffer
+
   // Include region file coverage (each region = 32 chunks = 512 blocks)
+  let regionMinX = Infinity, regionMaxX = -Infinity;
+  let regionMinZ = Infinity, regionMaxZ = -Infinity;
   for (const dim of worldInfo.dimensions) {
     const regionFiles = listRegionFiles(worldPath, dim);
     for (const f of regionFiles) {
@@ -156,16 +160,41 @@ function computeDynamicBounds(worldPath: string, worldInfo: import('../shared/pr
         const rMaxX = rMinX + 512;
         const rMinZ = coords.rz * 512;
         const rMaxZ = rMinZ + 512;
-        if (rMinX < minX) minX = rMinX;
-        if (rMaxX > maxX) maxX = rMaxX;
-        if (rMinZ < minZ) minZ = rMinZ;
-        if (rMaxZ > maxZ) maxZ = rMaxZ;
+        if (rMinX < regionMinX) regionMinX = rMinX;
+        if (rMaxX > regionMaxX) regionMaxX = rMaxX;
+        if (rMinZ < regionMinZ) regionMinZ = rMinZ;
+        if (rMaxZ > regionMaxZ) regionMaxZ = rMaxZ;
       }
     }
   }
 
-  // Include all player positions (with padding)
+  if (isFinite(regionMinX)) {
+    console.log(`  Region file coverage: X[${regionMinX}..${regionMaxX}] Z[${regionMinZ}..${regionMaxZ}] (${regionMaxX - regionMinX}x${regionMaxZ - regionMinZ})`);
+    minX = regionMinX; maxX = regionMaxX;
+    minZ = regionMinZ; maxZ = regionMaxZ;
+  }
+
+  // Include player positions
   const allPlayers = playerStore.getAll().players;
+
+  // Log player position distribution per dimension
+  const dimStats = new Map<string, { count: number; minX: number; maxX: number; minZ: number; maxZ: number }>();
+  for (const p of allPlayers) {
+    let stats = dimStats.get(p.dimension);
+    if (!stats) {
+      stats = { count: 0, minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity };
+      dimStats.set(p.dimension, stats);
+    }
+    stats.count++;
+    if (p.x < stats.minX) stats.minX = p.x;
+    if (p.x > stats.maxX) stats.maxX = p.x;
+    if (p.z < stats.minZ) stats.minZ = p.z;
+    if (p.z > stats.maxZ) stats.maxZ = p.z;
+  }
+  for (const [dim, stats] of dimStats) {
+    console.log(`  Player positions [${dim}]: ${stats.count} players, X[${Math.floor(stats.minX)}..${Math.ceil(stats.maxX)}] Z[${Math.floor(stats.minZ)}..${Math.ceil(stats.maxZ)}]`);
+  }
+
   for (const p of allPlayers) {
     if (p.x < minX) minX = Math.floor(p.x);
     if (p.x > maxX) maxX = Math.ceil(p.x);
@@ -192,35 +221,34 @@ function computeDynamicBounds(worldPath: string, worldInfo: import('../shared/pr
   minZ = Math.floor(minZ / 16) * 16;
   maxZ = Math.ceil(maxZ / 16) * 16;
 
+  // Final size cap — if bounds exceed MAX_MAP_SIZE, shrink to fit centered on the region area
+  const computedWidth = maxX - minX;
+  const computedHeight = maxZ - minZ;
+  if (computedWidth > MAX_MAP_SIZE || computedHeight > MAX_MAP_SIZE) {
+    const centerX = isFinite(regionMinX)
+      ? (regionMinX + regionMaxX) / 2
+      : (minX + maxX) / 2;
+    const centerZ = isFinite(regionMinZ)
+      ? (regionMinZ + regionMaxZ) / 2
+      : (minZ + maxZ) / 2;
+
+    // Keep whichever dimension is under the cap, shrink the other(s)
+    const capW = Math.min(computedWidth, MAX_MAP_SIZE);
+    const capH = Math.min(computedHeight, MAX_MAP_SIZE);
+
+    console.log(`  Bounds too large (${computedWidth}x${computedHeight}), capping to ${capW}x${capH} centered on region area`);
+
+    minX = Math.floor((centerX - capW / 2) / 16) * 16;
+    maxX = minX + Math.ceil(capW / 16) * 16;
+    minZ = Math.floor((centerZ - capH / 2) / 16) * 16;
+    maxZ = minZ + Math.ceil(capH / 16) * 16;
+  }
+
   console.log(`Dynamic bounds: X[${minX}..${maxX}] Z[${minZ}..${maxZ}] (${maxX - minX}x${maxZ - minZ} pixels)\n`);
 
   // Update config and worldInfo
   config.bounds = { minX, maxX, minZ, maxZ };
   worldInfo.bounds = { minX, maxX, minZ, maxZ };
-}
-
-async function createPlaceholderMap(dimension: string): Promise<void> {
-  const sharp = (await import('sharp')).default;
-  const { minX, maxX, minZ, maxZ } = config.bounds;
-  const width = maxX - minX;
-  const height = maxZ - minZ;
-  const slug = dimension.replace('minecraft:', '');
-
-  fs.mkdirSync(config.staticDir, { recursive: true });
-
-  // Dark gray placeholder
-  const pixels = Buffer.alloc(width * height * 4);
-  for (let i = 0; i < width * height; i++) {
-    pixels[i * 4] = 30;
-    pixels[i * 4 + 1] = 30;
-    pixels[i * 4 + 2] = 30;
-    pixels[i * 4 + 3] = 255;
-  }
-
-  const outPath = path.join(config.staticDir, `map-${slug}.png`);
-  await sharp(pixels, { raw: { width, height, channels: 4 } })
-    .png()
-    .toFile(outPath);
 }
 
 main().catch((err) => {

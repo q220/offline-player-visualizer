@@ -4,7 +4,7 @@ import { apiUrl } from './api';
 declare const L: typeof import('leaflet');
 
 let map: L.Map;
-let blockMapLayer: L.ImageOverlay | null = null;
+let blockMapLayer: L.GridLayer | null = null;
 let heatmapLayer: L.ImageOverlay | null = null;
 let playerMarkerLayer: L.LayerGroup;
 
@@ -18,7 +18,7 @@ export function initMap(worldInfo: WorldInfo): L.Map {
 
   map = L.map('map', {
     crs: L.CRS.Simple,
-    minZoom: -2,
+    minZoom: -5,
     maxZoom: 5,
     zoomSnap: 0.5,
     attributionControl: false,
@@ -31,23 +31,48 @@ export function initMap(worldInfo: WorldInfo): L.Map {
   return map;
 }
 
-export function setBlockMap(dimension: string, worldInfo: WorldInfo): void {
-  const { minX, maxX, minZ, maxZ } = worldInfo.bounds;
-  const bounds: L.LatLngBoundsExpression = [
-    [minZ, minX],
-    [maxZ, maxX],
-  ];
-
+/**
+ * Set the block map layer for a dimension using per-region tiles.
+ * Tiles are 512x512 px, one per region file.
+ * Tile coords map to Leaflet GridLayer coords:
+ *   tx = coords.x, ty = coords.y (server handles the Y-flip)
+ */
+export function setBlockMap(dimension: string, _worldInfo: WorldInfo): void {
   const slug = dimension.replace('minecraft:', '');
-  const url = apiUrl(`/static/map-${slug}.png`) + `?t=${Date.now()}`;
 
   if (blockMapLayer) {
     map.removeLayer(blockMapLayer);
   }
 
-  blockMapLayer = L.imageOverlay(url, bounds, { opacity: 1, zIndex: 1 }).addTo(
-    map,
-  );
+  const RegionTileLayer = L.GridLayer.extend({
+    createTile(coords: L.Coords) {
+      const tile = document.createElement('img') as HTMLImageElement;
+      tile.crossOrigin = '';
+      tile.style.width = '512px';
+      tile.style.height = '512px';
+
+      const url = apiUrl(`/static/tiles/${slug}/${coords.x}.${coords.y}.png`);
+      tile.src = url;
+
+      // If tile doesn't exist (no region file), show nothing
+      tile.onerror = () => {
+        tile.style.display = 'none';
+      };
+
+      return tile;
+    },
+  });
+
+  blockMapLayer = new RegionTileLayer({
+    tileSize: 512,
+    maxNativeZoom: 0,
+    minNativeZoom: 0,
+    minZoom: -5,
+    maxZoom: 5,
+    noWrap: true,
+    keepBuffer: 4,
+    updateWhenZooming: false,
+  }).addTo(map);
 }
 
 export function setHeatmap(

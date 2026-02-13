@@ -14,8 +14,19 @@ import { getBlockColor } from '../data/block-colors.js';
  * This handles MC versions that prismarine doesn't fully support (e.g. 1.21.4).
  */
 
-// Cache parsed chunk top-block data
-const chunkCache = new LRUCache<string, Uint8Array>({ max: 500 });
+export interface ChunkColumnData {
+  /** 16x16 RGBA pixels (16*16*4 = 1024 bytes) */
+  pixels: Uint8Array;
+  /** 16x16 height values (Y of the top non-air block) */
+  heights: Int16Array;
+  /** 16x16 boolean: true if the top block is water/lava */
+  isWater: Uint8Array;
+  /** 16x16 water depth (blocks of water above the solid block) */
+  waterDepth: Uint8Array;
+}
+
+// Cache parsed chunk column data
+const chunkCache = new LRUCache<string, ChunkColumnData>({ max: 500 });
 
 // Cache region file buffers to avoid re-reading
 const regionCache = new LRUCache<string, Buffer>({ max: 50 });
@@ -34,12 +45,11 @@ function getRegionBuffer(regionPath: string): Buffer | null {
 }
 
 function decompressChunkData(regionBuf: Buffer, localX: number, localZ: number): Buffer | null {
-  // Offset table: first 4KB, 4 bytes per chunk (32x32 = 1024 entries)
   const offsetIndex = (localX + localZ * 32) * 4;
   if (offsetIndex + 4 > regionBuf.length) return null;
 
   const offsetVal = regionBuf.readUInt32BE(offsetIndex);
-  if (offsetVal === 0) return null; // Chunk not generated
+  if (offsetVal === 0) return null;
 
   const sectorNumber = offsetVal >> 8;
   const byteOffset = sectorNumber * 4096;
@@ -54,17 +64,14 @@ function decompressChunkData(regionBuf: Buffer, localX: number, localZ: number):
   const compressedData = regionBuf.subarray(byteOffset + 5, byteOffset + 5 + dataLength);
 
   if (compressionType === 2) {
-    // zlib
     return zlib.inflateSync(compressedData);
   } else if (compressionType === 1) {
-    // gzip
     return zlib.gunzipSync(compressedData);
   }
 
   return null;
 }
 
-/** Extract palette index from packed long array (MC 1.16+ format) */
 function extractPaletteIndex(
   data: bigint[],
   blockIndex: number,
@@ -83,15 +90,12 @@ function extractPaletteIndex(
   return Number(value);
 }
 
-/** Convert raw long array to BigInt array */
 function toLongArray(rawData: any): bigint[] {
   if (!rawData) return [];
 
-  // prismarine-nbt returns long arrays as arrays of [high, low] pairs
   if (Array.isArray(rawData)) {
     return rawData.map((pair: any) => {
       if (Array.isArray(pair) && pair.length === 2) {
-        // [high, low] pair
         const hi = BigInt(pair[0]) & 0xFFFFFFFFn;
         const lo = BigInt(pair[1]) & 0xFFFFFFFFn;
         return (hi << 32n) | lo;
@@ -106,12 +110,14 @@ function toLongArray(rawData: any): bigint[] {
 
 interface SectionData {
   y: number;
-  palette: string[]; // Block names without minecraft: prefix
+  palette: string[];
   data: bigint[];
   bitsPerEntry: number;
 }
 
 const AIR_BLOCKS = new Set(['air', 'cave_air', 'void_air', '']);
+const WATER_BLOCKS = new Set(['water', 'lava', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass']);
+const TRANSPARENT_WATER = new Set(['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass']);
 
 async function parseSectionsFromNBT(nbtData: Buffer): Promise<{ sections: SectionData[]; minY: number }> {
   const { parsed } = await parseNBT(nbtData);
@@ -120,7 +126,6 @@ async function parseSectionsFromNBT(nbtData: Buffer): Promise<{ sections: Sectio
   const sections: SectionData[] = [];
   let minY = -64;
 
-  // Modern format (1.18+): sections are at root level
   const rawSectionsVal = root.sections || root.Sections;
   const rawSections = Array.isArray(rawSectionsVal) ? rawSectionsVal : [];
   if (root.yPos !== undefined) {
@@ -139,13 +144,11 @@ async function parseSectionsFromNBT(nbtData: Buffer): Promise<{ sections: Sectio
     const palette = blockStates.palette || blockStates.Palette;
     if (!palette || !Array.isArray(palette) || palette.length === 0) continue;
 
-    // Extract block names from palette
     const blockNames: string[] = palette.map((entry: any) => {
       const name = entry.Name || entry.name || '';
       return name.replace('minecraft:', '');
     });
 
-    // If palette has only 1 entry (SingleValueContainer), no data array needed
     const rawData = blockStates.data || blockStates.Data;
     if (!rawData || palette.length <= 1) {
       sections.push({
@@ -168,32 +171,42 @@ async function parseSectionsFromNBT(nbtData: Buffer): Promise<{ sections: Sectio
     });
   }
 
-  // Sort sections by Y descending (so we scan top-down)
   sections.sort((a, b) => b.y - a.y);
 
   return { sections, minY };
 }
 
-/** Compute region coordinates that round toward negative infinity */
 function regionCoord(chunkCoord: number): number {
   return Math.floor(chunkCoord / 32);
 }
 
+function getBlockName(sec: SectionData, blockIndex: number): string {
+  if (sec.bitsPerEntry === 0) {
+    return sec.palette[0] || '';
+  }
+  const paletteIdx = extractPaletteIndex(sec.data, blockIndex, sec.bitsPerEntry);
+  return sec.palette[paletteIdx] || '';
+}
+
 /**
- * Load a chunk from a raw .mca file and extract top-block colors.
- * Returns a 16x16x4 Uint8Array of RGBA pixels.
+ * Load a chunk and extract top-block colors, heights, and water info.
  */
-export async function loadChunkTopBlocks(
+export async function loadChunkColumnData(
   worldPath: string,
   dimension: string,
   chunkX: number,
   chunkZ: number,
-): Promise<Uint8Array> {
+): Promise<ChunkColumnData> {
   const key = `raw:${dimension}:${chunkX}:${chunkZ}`;
   const cached = chunkCache.get(key);
   if (cached !== undefined) return cached;
 
-  const pixels = new Uint8Array(16 * 16 * 4);
+  const result: ChunkColumnData = {
+    pixels: new Uint8Array(16 * 16 * 4),
+    heights: new Int16Array(16 * 16),
+    isWater: new Uint8Array(16 * 16),
+    waterDepth: new Uint8Array(16 * 16),
+  };
 
   const regionDir = getRegionDir(worldPath, dimension);
   const rx = regionCoord(chunkX);
@@ -202,56 +215,79 @@ export async function loadChunkTopBlocks(
   const regionPath = path.join(regionDir, `r.${rx}.${rz}.mca`);
   const regionBuf = getRegionBuffer(regionPath);
   if (!regionBuf) {
-    chunkCache.set(key, pixels);
-    return pixels;
+    chunkCache.set(key, result);
+    return result;
   }
 
-  // Local chunk coords within region (0-31)
   const localX = ((chunkX % 32) + 32) % 32;
   const localZ = ((chunkZ % 32) + 32) % 32;
 
   const nbtData = decompressChunkData(regionBuf, localX, localZ);
   if (!nbtData) {
-    chunkCache.set(key, pixels);
-    return pixels;
+    chunkCache.set(key, result);
+    return result;
   }
 
   try {
     const { sections } = await parseSectionsFromNBT(nbtData);
 
-    // For each column (x, z), find the topmost non-air block
     for (let x = 0; x < 16; x++) {
       for (let z = 0; z < 16; z++) {
-        let found = false;
+        const colIdx = z * 16 + x;
+        let foundSolid = false;
+        let waterSurfaceY = -9999;
+        let solidY = -9999;
 
         // Sections are sorted top-down
         for (const sec of sections) {
-          if (found) break;
+          if (foundSolid) break;
 
-          // Scan Y from top (15) to bottom (0) within section
           for (let sy = 15; sy >= 0; sy--) {
             const blockIndex = (sy << 8) | (z << 4) | x;
+            const blockName = getBlockName(sec, blockIndex);
+            const absY = sec.y * 16 + sy;
 
-            let blockName: string;
-            if (sec.bitsPerEntry === 0) {
-              // SingleValueContainer - entire section is one block type
-              blockName = sec.palette[0] || '';
+            if (AIR_BLOCKS.has(blockName)) continue;
+
+            if (TRANSPARENT_WATER.has(blockName)) {
+              if (waterSurfaceY === -9999) waterSurfaceY = absY;
+              continue;
+            }
+
+            // Found a solid block (or lava)
+            solidY = absY;
+            const color = getBlockColor(blockName);
+            const idx = colIdx * 4;
+            result.pixels[idx] = color[0];
+            result.pixels[idx + 1] = color[1];
+            result.pixels[idx + 2] = color[2];
+            result.pixels[idx + 3] = color[3];
+
+            if (waterSurfaceY !== -9999) {
+              // Water above this solid block
+              result.isWater[colIdx] = 1;
+              result.waterDepth[colIdx] = Math.min(255, waterSurfaceY - absY);
+              result.heights[colIdx] = waterSurfaceY;
             } else {
-              const paletteIdx = extractPaletteIndex(sec.data, blockIndex, sec.bitsPerEntry);
-              blockName = sec.palette[paletteIdx] || '';
+              result.heights[colIdx] = absY;
             }
 
-            if (!AIR_BLOCKS.has(blockName)) {
-              const color = getBlockColor(blockName);
-              const idx = (z * 16 + x) * 4;
-              pixels[idx] = color[0];
-              pixels[idx + 1] = color[1];
-              pixels[idx + 2] = color[2];
-              pixels[idx + 3] = color[3];
-              found = true;
-              break;
-            }
+            foundSolid = true;
+            break;
           }
+        }
+
+        // If only water was found (ocean floor out of range), use water surface
+        if (!foundSolid && waterSurfaceY !== -9999) {
+          const color = getBlockColor('water');
+          const idx = colIdx * 4;
+          result.pixels[idx] = color[0];
+          result.pixels[idx + 1] = color[1];
+          result.pixels[idx + 2] = color[2];
+          result.pixels[idx + 3] = color[3];
+          result.isWater[colIdx] = 1;
+          result.waterDepth[colIdx] = 255;
+          result.heights[colIdx] = waterSurfaceY;
         }
       }
     }
@@ -259,13 +295,21 @@ export async function loadChunkTopBlocks(
     console.error(`  Failed to parse chunk (${chunkX}, ${chunkZ}): ${e.message}`);
   }
 
-  chunkCache.set(key, pixels);
-  return pixels;
+  chunkCache.set(key, result);
+  return result;
 }
 
-/**
- * Debug: load and inspect a single chunk's raw NBT data.
- */
+// Keep old API for compatibility
+export async function loadChunkTopBlocks(
+  worldPath: string,
+  dimension: string,
+  chunkX: number,
+  chunkZ: number,
+): Promise<Uint8Array> {
+  const data = await loadChunkColumnData(worldPath, dimension, chunkX, chunkZ);
+  return data.pixels;
+}
+
 export async function debugRawChunk(
   worldPath: string,
   dimension: string,
@@ -297,45 +341,16 @@ export async function debugRawChunk(
 
   console.log(`  [raw-debug] Decompressed NBT size: ${nbtData.length} bytes`);
 
-  // Also dump the raw NBT keys at root level for format verification
   try {
-    const { parsed } = await parseNBT(nbtData);
-    const root = simplifyNBT(parsed);
-    const rootKeys = Object.keys(root);
-    console.log(`  [raw-debug] Root NBT keys: ${rootKeys.join(', ')}`);
-    if (root.Status || root.status) {
-      console.log(`  [raw-debug] Chunk status: ${root.Status || root.status}`);
-    }
-    if (root.DataVersion) {
-      console.log(`  [raw-debug] DataVersion: ${root.DataVersion}`);
-    }
-  } catch (e: any) {
-    console.log(`  [raw-debug] Failed to dump root keys: ${e.message}`);
-  }
-
-  try {
-    const { sections, minY } = await parseSectionsFromNBT(nbtData);
-    console.log(`  [raw-debug] minY=${minY}, ${sections.length} sections parsed`);
-
-    let nonAirSections = 0;
-    for (const sec of sections) {
-      const isAirOnly = sec.palette.length === 1 && AIR_BLOCKS.has(sec.palette[0]);
-      if (!isAirOnly) {
-        nonAirSections++;
-        console.log(`  [raw-debug]   Section Y=${sec.y}: palette(${sec.palette.length})=[${sec.palette.slice(0, 8).join(', ')}${sec.palette.length > 8 ? '...' : ''}], bitsPerEntry=${sec.bitsPerEntry}, dataLen=${sec.data.length}`);
-      }
-    }
-    console.log(`  [raw-debug]   ${nonAirSections} non-air sections, ${sections.length - nonAirSections} air-only sections`);
-
-    // Try extracting top blocks for this chunk
-    const topBlocks = await loadChunkTopBlocks(worldPath, dimension, chunkX, chunkZ);
+    const data = await loadChunkColumnData(worldPath, dimension, chunkX, chunkZ);
     let nonTransparent = 0;
-    for (let i = 3; i < topBlocks.length; i += 4) {
-      if (topBlocks[i] > 0) nonTransparent++;
+    let waterCols = 0;
+    for (let i = 0; i < 256; i++) {
+      if (data.pixels[i * 4 + 3] > 0) nonTransparent++;
+      if (data.isWater[i]) waterCols++;
     }
-    console.log(`  [raw-debug]   Top-block result: ${nonTransparent}/256 non-transparent pixels`);
+    console.log(`  [raw-debug]   Top-block result: ${nonTransparent}/256 non-transparent, ${waterCols} water columns`);
   } catch (e: any) {
     console.log(`  [raw-debug] Parse error: ${e.message}`);
-    console.log(`  [raw-debug] Stack: ${e.stack}`);
   }
 }
