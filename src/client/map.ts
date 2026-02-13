@@ -253,11 +253,12 @@ export function setHeatmapLegend(maxPerChunk: number, totalPlayers: number): voi
 
       // Color gradient bar (matches heatmapColor in heatmap-renderer.ts)
       const stops = [
-        'rgba(0,0,100,0.24)',   // 0.005 - low
-        'rgba(0,80,255,0.37)',  // 0.25
-        'rgba(0,255,255,0.50)', // 0.50
-        'rgba(255,255,0,0.63)', // 0.75
-        'rgba(255,0,0,0.78)',   // 1.0 - high
+        'rgba(30,60,180,0.40)',   // low - deep blue
+        'rgba(0,140,255,0.55)',   // blue-cyan
+        'rgba(0,255,255,0.60)',   // cyan
+        'rgba(200,255,0,0.70)',   // yellow-green
+        'rgba(255,155,0,0.80)',   // orange
+        'rgba(255,0,0,0.90)',     // red - high
       ];
 
       const gradientBar = `linear-gradient(to right, ${stops.join(', ')})`;

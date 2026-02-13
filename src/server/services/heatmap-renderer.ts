@@ -98,22 +98,40 @@ export async function renderHeatmap(
   for (let i = 0; i < density.length; i++) {
     if (density[i] > maxDensity) maxDensity = density[i];
   }
-  console.log(`  Max density: ${maxDensity} players/chunk`);
-
-  // Copy raw density for contour extraction (before log-scale)
-  const rawDensity = new Float32Array(density);
-
-  // Apply log scale
-  const logMax = Math.log1p(maxDensity);
+  // Density distribution diagnostics
+  let nonZeroChunks = 0;
+  let onePlayerChunks = 0;
+  const densityBuckets = [0, 0, 0, 0, 0]; // 1, 2-5, 6-10, 11-50, 50+
   for (let i = 0; i < density.length; i++) {
     if (density[i] > 0) {
-      density[i] = Math.log1p(density[i]) / logMax;
+      nonZeroChunks++;
+      if (density[i] === 1) { onePlayerChunks++; densityBuckets[0]++; }
+      else if (density[i] <= 5) densityBuckets[1]++;
+      else if (density[i] <= 10) densityBuckets[2]++;
+      else if (density[i] <= 50) densityBuckets[3]++;
+      else densityBuckets[4]++;
+    }
+  }
+  console.log(`  Max density: ${maxDensity} players/chunk`);
+  console.log(`  Non-zero chunks: ${nonZeroChunks}/${chunkW * chunkH} (${(nonZeroChunks / (chunkW * chunkH) * 100).toFixed(1)}%)`);
+  console.log(`  Distribution: 1p=${densityBuckets[0]} 2-5p=${densityBuckets[1]} 6-10p=${densityBuckets[2]} 11-50p=${densityBuckets[3]} 50+p=${densityBuckets[4]}`);
+
+  // Copy raw density for contour extraction (before transforms)
+  const rawDensity = new Float32Array(density);
+
+  // Apply sqrt scale (gentler than log — preserves low-density detail)
+  const sqrtMax = Math.sqrt(maxDensity);
+  for (let i = 0; i < density.length; i++) {
+    if (density[i] > 0) {
+      density[i] = Math.sqrt(density[i]) / sqrtMax;
     }
   }
 
-  // Blur — at chunk resolution, sigma 2-5 is plenty
-  const blurSigma = Math.max(2, Math.min(8, Math.round(Math.sqrt((chunkW * chunkH) / inBoundsCount) * 0.5)));
-  console.log(`  Blur sigma: ${blurSigma} (chunk resolution)`);
+  // Blur — scale with world size, not just density
+  // Sparse data needs a wide kernel to create meaningful gradients
+  const worldDiag = Math.sqrt(chunkW * chunkW + chunkH * chunkH);
+  const blurSigma = Math.max(6, Math.min(30, Math.round(worldDiag / 25)));
+  console.log(`  Blur sigma: ${blurSigma} (chunk resolution, world diagonal ${Math.round(worldDiag)} chunks)`);
 
   const blurred = gaussianBlurFloat32(density, chunkW, chunkH, blurSigma);
 
@@ -488,23 +506,33 @@ async function writeContourJson(
 // ---- Color mapping ----
 
 function heatmapColor(val: number): [number, number, number, number] {
-  if (val < 0.005) return [0, 0, 0, 0];
+  // Very low cutoff — show even the faintest signal
+  if (val < 0.001) return [0, 0, 0, 0];
 
-  const alpha = Math.round(Math.min(60 + val * 200, 200));
+  // Higher base alpha so low-density areas are clearly visible
+  const alpha = Math.round(Math.min(100 + val * 155, 230));
   let r: number, g: number, b: number;
 
-  if (val < 0.25) {
-    const t = val / 0.25;
-    r = 0; g = Math.round(t * 80); b = Math.round(100 + t * 155);
-  } else if (val < 0.5) {
-    const t = (val - 0.25) / 0.25;
-    r = 0; g = Math.round(80 + t * 175); b = 255;
+  if (val < 0.15) {
+    // Deep blue → bright blue (visible on dark backgrounds)
+    const t = val / 0.15;
+    r = Math.round(30 + t * 10); g = Math.round(60 + t * 80); b = Math.round(180 + t * 75);
+  } else if (val < 0.35) {
+    // Blue → cyan
+    const t = (val - 0.15) / 0.2;
+    r = Math.round(40 * (1 - t)); g = Math.round(140 + t * 115); b = 255;
+  } else if (val < 0.55) {
+    // Cyan → green-yellow
+    const t = (val - 0.35) / 0.2;
+    r = Math.round(t * 200); g = 255; b = Math.round(255 * (1 - t));
   } else if (val < 0.75) {
-    const t = (val - 0.5) / 0.25;
-    r = Math.round(t * 255); g = 255; b = Math.round(255 * (1 - t));
+    // Yellow → orange
+    const t = (val - 0.55) / 0.2;
+    r = Math.round(200 + t * 55); g = Math.round(255 - t * 100); b = 0;
   } else {
+    // Orange → red
     const t = (val - 0.75) / 0.25;
-    r = 255; g = Math.round(255 * (1 - t)); b = 0;
+    r = 255; g = Math.round(155 * (1 - t)); b = 0;
   }
 
   return [r, g, b, alpha];
