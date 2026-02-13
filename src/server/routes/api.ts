@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { playerStore } from '../services/player-store.js';
 import { renderHeatmap } from '../services/heatmap-renderer.js';
+import { renderTile } from '../services/map-renderer.js';
+import { config } from '../config.js';
 import type { WorldInfo, HeatmapRenderRequest } from '../../shared/protocol.js';
 
 export async function registerApiRoutes(
@@ -61,6 +63,39 @@ export async function registerApiRoutes(
       return { error: 'Player not found' };
     }
     return player;
+  });
+
+  // On-demand tile rendering
+  app.get<{
+    Params: { dimension: string; tx: string; ty: string };
+  }>('/api/tiles/:dimension/:tx/:ty', async (req, reply) => {
+    const { dimension, tx: txStr, ty: tyStr } = req.params;
+    const tx = parseInt(txStr);
+    const ty = parseInt(tyStr.replace('.png', ''));
+
+    if (isNaN(tx) || isNaN(ty)) {
+      reply.code(400);
+      return { error: 'Invalid tile coordinates' };
+    }
+
+    // Resolve full dimension name
+    const fullDim = dimension.includes(':') ? dimension : `minecraft:${dimension}`;
+
+    try {
+      const pngBuffer = await renderTile(config.worldPath, fullDim, tx, ty);
+      if (!pngBuffer) {
+        reply.code(404);
+        return reply.send();
+      }
+
+      reply.header('Content-Type', 'image/png');
+      reply.header('Cache-Control', 'public, max-age=86400');
+      return reply.send(pngBuffer);
+    } catch (e: any) {
+      console.error(`Tile render error (${dimension} ${tx},${ty}):`, e.message);
+      reply.code(500);
+      return { error: 'Tile render failed' };
+    }
   });
 
   // Re-render heatmap with filters

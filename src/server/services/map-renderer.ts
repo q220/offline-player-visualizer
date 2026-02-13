@@ -1,8 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
-import { config } from '../config.js';
-import { listRegionFiles, parseRegionCoords } from './region-loader.js';
 import { loadChunkColumnData } from './raw-chunk-reader.js';
 import { dimensionSlug } from '../../shared/constants.js';
 
@@ -14,65 +12,84 @@ const SHADE_DARKEN = 0.83;
 const WATER_TINT_COLOR = [40, 50, 150];
 const WATER_MAX_DEPTH_FOR_TINT = 30;
 
+// Persistent cache directory (survives vite builds and git pulls)
+const TILE_CACHE_DIR = path.resolve('.tile-cache');
+
 /**
- * Render per-region tiles (512x512 each) for a dimension.
- * Each tile is saved as tiles/{slug}/{tx}.{ty}.png where:
- *   tx = region rx
- *   ty = -rz - 1  (Y-flipped for Leaflet CRS.Simple)
- * Returns the list of tile coordinates rendered.
+ * Get the path for a cached tile PNG.
  */
-export async function renderTiles(
+export function getTileCachePath(dimension: string, tx: number, ty: number): string {
+  const slug = dimensionSlug(dimension);
+  return path.join(TILE_CACHE_DIR, slug, `${tx}.${ty}.png`);
+}
+
+/**
+ * Check if a tile is already cached on disk.
+ */
+export function isTileCached(dimension: string, tx: number, ty: number): boolean {
+  return fs.existsSync(getTileCachePath(dimension, tx, ty));
+}
+
+/**
+ * Render a single tile on demand and cache it to disk.
+ * Tile coordinates: tx = region rx, ty = -rz - 1 (Y-flipped for Leaflet).
+ * Returns the PNG buffer, or null if the region has no content.
+ */
+export async function renderTile(
   worldPath: string,
   dimension: string,
-  _mcVersion: string,
-): Promise<{ tx: number; ty: number }[]> {
-  const slug = dimensionSlug(dimension);
-  const tileDir = path.join(config.staticDir, 'tiles', slug);
-  fs.mkdirSync(tileDir, { recursive: true });
-
-  const regionFiles = listRegionFiles(worldPath, dimension);
-  console.log(`Rendering ${slug} tiles: ${regionFiles.length} region files`);
-
-  if (regionFiles.length === 0) return [];
-
-  const tiles: { tx: number; ty: number }[] = [];
-  let rendered = 0;
-
-  for (const f of regionFiles) {
-    const coords = parseRegionCoords(f);
-    if (!coords) continue;
-
-    const { rx, rz } = coords;
-    const tileResult = await renderRegionTile(worldPath, dimension, rx, rz);
-
-    if (tileResult) {
-      const tx = rx;
-      const ty = -rz - 1;
-      const tilePath = path.join(tileDir, `${tx}.${ty}.png`);
-
-      await sharp(tileResult, { raw: { width: 512, height: 512, channels: 4 } })
-        .png()
-        .toFile(tilePath);
-
-      tiles.push({ tx, ty });
-    }
-
-    rendered++;
-    if (rendered % 10 === 0 || rendered === regionFiles.length) {
-      console.log(`  ${rendered}/${regionFiles.length} regions processed (${tiles.length} tiles with content)`);
-    }
+  tx: number,
+  ty: number,
+): Promise<Buffer | null> {
+  // Check cache first
+  const cachePath = getTileCachePath(dimension, tx, ty);
+  if (fs.existsSync(cachePath)) {
+    return fs.readFileSync(cachePath);
   }
 
-  console.log(`Tiles saved: ${tiles.length} tiles to ${tileDir}`);
-  return tiles;
+  // Convert tile coords to region coords
+  const rx = tx;
+  const rz = -ty - 1;
+
+  // Render the region
+  const pixels = await renderRegionPixels(worldPath, dimension, rx, rz);
+  if (!pixels) return null;
+
+  // Save PNG to cache
+  const dir = path.dirname(cachePath);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const pngBuffer = await sharp(pixels, { raw: { width: 512, height: 512, channels: 4 } })
+    .png()
+    .toBuffer();
+
+  fs.writeFileSync(cachePath, pngBuffer);
+  return pngBuffer;
+}
+
+/**
+ * Clear the tile cache for a dimension (or all dimensions).
+ */
+export function clearTileCache(dimension?: string): void {
+  if (dimension) {
+    const dir = path.join(TILE_CACHE_DIR, dimensionSlug(dimension));
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true });
+      console.log(`Cleared tile cache for ${dimension}`);
+    }
+  } else {
+    if (fs.existsSync(TILE_CACHE_DIR)) {
+      fs.rmSync(TILE_CACHE_DIR, { recursive: true });
+      console.log('Cleared all tile cache');
+    }
+  }
 }
 
 /**
  * Render a single region as a 512x512 RGBA buffer.
- * The image is Y-flipped: row 0 = highest worldZ, row 511 = lowest worldZ.
- * This matches Leaflet's CRS.Simple tile system where pixel Y increases downward.
+ * Y-flipped: row 0 = highest worldZ, row 511 = lowest worldZ.
  */
-async function renderRegionTile(
+async function renderRegionPixels(
   worldPath: string,
   dimension: string,
   rx: number,
@@ -85,7 +102,6 @@ async function renderRegionTile(
 
   let hasContent = false;
 
-  // Load all 32x32 chunks in this region
   for (let cx = 0; cx < 32; cx++) {
     for (let cz = 0; cz < 32; cz++) {
       const chunkX = rx * 32 + cx;
@@ -95,11 +111,8 @@ async function renderRegionTile(
       for (let bx = 0; bx < 16; bx++) {
         for (let bz = 0; bz < 16; bz++) {
           const srcIdx = bz * 16 + bx;
-
-          // Skip empty blocks
           if (chunkData.pixels[srcIdx * 4 + 3] === 0) continue;
 
-          // Tile pixel position (Y-flipped: high Z at top)
           const px = cx * 16 + bx;
           const py = 511 - (cz * 16 + bz);
           const dstIdx = py * 512 + px;
@@ -122,30 +135,22 @@ async function renderRegionTile(
 
   if (!hasContent) return null;
 
-  // Apply heightmap shading and water tinting.
-  // Note: shading compares with the pixel above (py-1) which is the HIGHER worldZ
-  // (north neighbor in Minecraft = higher Z = lower py in our Y-flipped image).
-  // So comparing with py-1 gives us the north neighbor, which is correct for
-  // Dynmap-style "sun from north" shading.
+  // Apply heightmap shading and water tinting
   for (let py = 0; py < 512; py++) {
     for (let px = 0; px < 512; px++) {
       const idx = py * 512 + px;
       const pixelIdx = idx * 4;
-
       if (pixels[pixelIdx + 3] === 0) continue;
 
       let r = pixels[pixelIdx];
       let g = pixels[pixelIdx + 1];
       let b = pixels[pixelIdx + 2];
 
-      // Heightmap shading: compare with northern neighbor (py+1 = lower worldZ = south)
-      // Actually in our flipped image: py-1 = higher worldZ = north in MC.
-      // We want: if current is higher than north → brighten (sunlit slope facing south)
+      // Heightmap shading: compare with row above (py-1 = higher worldZ = north)
       if (py > 0) {
         const northIdx = (py - 1) * 512 + px;
         if (pixels[northIdx * 4 + 3] > 0) {
           const heightDiff = heights[idx] - heights[northIdx];
-
           if (heightDiff > 0) {
             const factor = Math.min(SHADE_BRIGHTEN, 1 + heightDiff * 0.04);
             r = Math.min(255, Math.round(r * factor));
@@ -160,15 +165,12 @@ async function renderRegionTile(
         }
       }
 
-      // Water depth tinting
       if (waterMap[idx]) {
         const depth = waterDepthMap[idx];
         const blend = Math.min(0.6, (depth / WATER_MAX_DEPTH_FOR_TINT) * 0.6);
-
         r = Math.round(r * (1 - blend) + WATER_TINT_COLOR[0] * blend);
         g = Math.round(g * (1 - blend) + WATER_TINT_COLOR[1] * blend);
         b = Math.round(b * (1 - blend) + WATER_TINT_COLOR[2] * blend);
-
         const darken = Math.max(0.7, 1 - depth * 0.008);
         r = Math.round(r * darken);
         g = Math.round(g * darken);
@@ -184,12 +186,20 @@ async function renderRegionTile(
   return pixels;
 }
 
-// Keep old API name for compatibility but redirect to tile rendering
+// Legacy export — no longer pre-renders, tiles are rendered on demand via API
 export async function renderBlockMap(
-  worldPath: string,
+  _worldPath: string,
   dimension: string,
-  mcVersion: string,
+  _mcVersion: string,
 ): Promise<string> {
-  await renderTiles(worldPath, dimension, mcVersion);
-  return `/static/tiles/${dimensionSlug(dimension)}/`;
+  const slug = dimensionSlug(dimension);
+  const cacheDir = path.join(TILE_CACHE_DIR, slug);
+  fs.mkdirSync(cacheDir, { recursive: true });
+
+  const cachedCount = fs.existsSync(cacheDir)
+    ? fs.readdirSync(cacheDir).filter(f => f.endsWith('.png')).length
+    : 0;
+  console.log(`  Tiles for ${slug}: on-demand rendering (${cachedCount} cached)`);
+
+  return `/api/tiles/${slug}/`;
 }

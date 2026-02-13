@@ -4,3 +4,5 @@ dist/
 .player-index-cache.json
 .env
 test-world/
+.tile-cache/
+server.log

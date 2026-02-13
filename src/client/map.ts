@@ -51,7 +51,7 @@ export function setBlockMap(dimension: string, _worldInfo: WorldInfo): void {
       tile.style.width = '512px';
       tile.style.height = '512px';
 
-      const url = apiUrl(`/static/tiles/${slug}/${coords.x}.${coords.y}.png`);
+      const url = apiUrl(`/api/tiles/${slug}/${coords.x}/${coords.y}.png`);
       tile.src = url;
 
       // If tile doesn't exist (no region file), show nothing
