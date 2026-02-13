@@ -22,6 +22,13 @@ export interface WorldInfo {
   spawn?: { x: number; z: number };
   /** Per-dimension heatmap density info for the legend */
   heatmapDensity?: Record<string, { maxPerChunk: number; totalPlayers: number; contoursUrl: string }>;
+  /** Bounds that encompass all player positions (may extend beyond region bounds) */
+  playerBounds?: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
 }
 
 export interface PlayersResponse {

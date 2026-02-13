@@ -10,14 +10,21 @@ let heatmapLayer: L.ImageOverlay | null = null;
 let playerMarkerLayer: L.LayerGroup;
 let legendControl: L.Control | null = null;
 let contourLayer: L.LayerGroup | null = null;
+let storedWorldInfo: WorldInfo;
+let regionBounds: L.LatLngBounds;
 
 export function initMap(worldInfo: WorldInfo): L.Map {
+  storedWorldInfo = worldInfo;
   const { minX, maxX, minZ, maxZ } = worldInfo.bounds;
 
   // Create bounds for CRS.Simple: [lat, lng] = [z, x] in Minecraft terms
   const southWest = L.latLng(minZ, minX);
   const northEast = L.latLng(maxZ, maxX);
-  const bounds = L.latLngBounds(southWest, northEast);
+  regionBounds = L.latLngBounds(southWest, northEast);
+
+  // Pad maxBounds slightly so the map doesn't feel claustrophobically clipped
+  const padLat = (maxZ - minZ) * 0.1;
+  const padLng = (maxX - minX) * 0.1;
 
   map = L.map('map', {
     crs: L.CRS.Simple,
@@ -25,13 +32,48 @@ export function initMap(worldInfo: WorldInfo): L.Map {
     maxZoom: 5,
     zoomSnap: 0.5,
     attributionControl: false,
+    maxBounds: L.latLngBounds(
+      L.latLng(minZ - padLat, minX - padLng),
+      L.latLng(maxZ + padLat, maxX + padLng),
+    ),
+    maxBoundsViscosity: 0.8,
   });
 
-  map.fitBounds(bounds);
+  map.fitBounds(regionBounds);
 
   playerMarkerLayer = L.layerGroup().addTo(map);
 
   return map;
+}
+
+/**
+ * Toggle whether the map can pan beyond region bounds to show out-of-bounds players.
+ */
+export function toggleExtendedBounds(extended: boolean): void {
+  if (!map || !storedWorldInfo) return;
+
+  if (extended && storedWorldInfo.playerBounds) {
+    const pb = storedWorldInfo.playerBounds;
+    const padLat = (pb.maxZ - pb.minZ) * 0.1;
+    const padLng = (pb.maxX - pb.minX) * 0.1;
+    map.setMaxBounds(L.latLngBounds(
+      L.latLng(pb.minZ - padLat, pb.minX - padLng),
+      L.latLng(pb.maxZ + padLat, pb.maxX + padLng),
+    ));
+  } else {
+    // Restore region-based maxBounds
+    const { minX, maxX, minZ, maxZ } = storedWorldInfo.bounds;
+    const padLat = (maxZ - minZ) * 0.1;
+    const padLng = (maxX - minX) * 0.1;
+    map.setMaxBounds(L.latLngBounds(
+      L.latLng(minZ - padLat, minX - padLng),
+      L.latLng(maxZ + padLat, maxX + padLng),
+    ));
+    // Snap back to region bounds if currently panned outside
+    if (!regionBounds.contains(map.getCenter())) {
+      map.fitBounds(regionBounds);
+    }
+  }
 }
 
 /**

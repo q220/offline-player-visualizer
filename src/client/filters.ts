@@ -8,6 +8,7 @@ import {
   loadContours,
   toggleHeatmapVisibility,
   toggleBlockMapVisibility,
+  toggleExtendedBounds,
   getMap,
 } from './map';
 import { setPlayerDimension, setPlayerDateFilter, getPlayerDateFilter } from './player-layer';
@@ -63,6 +64,21 @@ export function initFilters(info: WorldInfo): void {
   toggleBlockmapEl.addEventListener('change', () => {
     toggleBlockMapVisibility(toggleBlockmapEl.checked);
   });
+
+  // Out-of-bounds players toggle
+  const toggleOobEl = document.getElementById(
+    'toggle-oob-players',
+  ) as HTMLInputElement | null;
+  if (toggleOobEl) {
+    if (!info.playerBounds) {
+      toggleOobEl.disabled = true;
+      toggleOobEl.parentElement!.title = 'No players found outside world bounds';
+      toggleOobEl.parentElement!.style.opacity = '0.5';
+    }
+    toggleOobEl.addEventListener('change', () => {
+      toggleExtendedBounds(toggleOobEl.checked);
+    });
+  }
 
   // Date filter elements
   const applyBtn = document.getElementById('apply-date-filter')! as HTMLButtonElement;
