@@ -2,8 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
 import { config } from '../config.js';
-import { loadChunk, initAnvil, listRegionFiles, parseRegionCoords } from './region-loader.js';
-import { extractTopBlocks } from './chunk-processor.js';
+import { listRegionFiles, parseRegionCoords } from './region-loader.js';
+import { loadChunkTopBlocks, debugRawChunk } from './raw-chunk-reader.js';
 import { dimensionSlug } from '../../shared/constants.js';
 
 export async function renderBlockMap(
@@ -11,8 +11,6 @@ export async function renderBlockMap(
   dimension: string,
   mcVersion: string,
 ): Promise<string> {
-  await initAnvil(mcVersion);
-
   const { minX, maxX, minZ, maxZ } = config.bounds;
   const width = maxX - minX;
   const height = maxZ - minZ;
@@ -47,11 +45,10 @@ export async function renderBlockMap(
   }
 
   console.log(
-    `Rendering ${dimensionSlug(dimension)} block map: ${totalChunks} chunks in ${existingRegions.size} regions (${width}x${height} pixels)`,
+    `Rendering ${dimensionSlug(dimension)} block map (raw reader): ${totalChunks} chunks in ${existingRegions.size} regions (${width}x${height} pixels)`,
   );
 
   if (totalChunks === 0) {
-    // No regions - just write empty image
     const slug = dimensionSlug(dimension);
     const outDir = config.staticDir;
     fs.mkdirSync(outDir, { recursive: true });
@@ -63,6 +60,12 @@ export async function renderBlockMap(
     return `/static/map-${slug}.png`;
   }
 
+  // Debug chunk (0,0) to verify raw reader works
+  console.log(`  Debugging chunk (0,0) with raw reader...`);
+  await debugRawChunk(worldPath, dimension, 0, 0);
+
+  let nonEmptyChunks = 0;
+
   for (let cx = minChunkX; cx <= maxChunkX; cx++) {
     for (let cz = minChunkZ; cz <= maxChunkZ; cz++) {
       // Skip chunks in non-existent regions
@@ -70,8 +73,10 @@ export async function renderBlockMap(
       const rz = Math.floor(cz / 32);
       if (!existingRegions.has(`${rx},${rz}`)) continue;
 
-      const chunk = await loadChunk(worldPath, dimension, cx, cz);
-      const topBlocks = extractTopBlocks(chunk);
+      const topBlocks = await loadChunkTopBlocks(worldPath, dimension, cx, cz);
+
+      // Check if chunk has any non-transparent pixels
+      let hasContent = false;
 
       // Copy chunk pixels to the image buffer
       for (let bx = 0; bx < 16; bx++) {
@@ -92,17 +97,23 @@ export async function renderBlockMap(
           pixels[dstIdx + 1] = topBlocks[srcIdx + 1];
           pixels[dstIdx + 2] = topBlocks[srcIdx + 2];
           pixels[dstIdx + 3] = topBlocks[srcIdx + 3];
+
+          if (topBlocks[srcIdx + 3] > 0) hasContent = true;
         }
       }
+
+      if (hasContent) nonEmptyChunks++;
 
       processedChunks++;
       if (processedChunks % 100 === 0 || processedChunks === totalChunks) {
         console.log(
-          `  ${processedChunks}/${totalChunks} chunks (${Math.round((processedChunks / totalChunks) * 100)}%)`,
+          `  ${processedChunks}/${totalChunks} chunks (${Math.round((processedChunks / totalChunks) * 100)}%) - ${nonEmptyChunks} with content`,
         );
       }
     }
   }
+
+  console.log(`  Total: ${nonEmptyChunks}/${processedChunks} chunks had non-air blocks`);
 
   // Write PNG
   const slug = dimensionSlug(dimension);
