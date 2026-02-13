@@ -8,7 +8,7 @@ import { config } from './config.js';
 import { scanWorld } from './services/world-scanner.js';
 import { indexPlayers } from './services/player-indexer.js';
 import { playerStore } from './services/player-store.js';
-import { renderBlockMap } from './services/map-renderer.js';
+// renderBlockMap no longer used — tiles are rendered on-demand
 import { renderHeatmap } from './services/heatmap-renderer.js';
 import { listRegionFiles, parseRegionCoords } from './services/region-loader.js';
 import { registerApiRoutes } from './routes/api.js';
@@ -80,23 +80,22 @@ async function main() {
   // Compute bounds from region files + player positions
   computeDynamicBounds(worldPath, worldInfo);
 
-  // 4. Pre-render block map tiles and heatmaps
+  // 4. Pre-render heatmaps (tiles are rendered on-demand)
+  worldInfo.heatmapDensity = {};
   for (const dimension of worldInfo.dimensions) {
     const hasRegions = listRegionFiles(worldPath, dimension).length > 0;
-    if (hasRegions) {
-      try {
-        console.log(`Rendering tiles for ${dimension}...`);
-        await renderBlockMap(worldPath, dimension, worldInfo.mcVersion);
-      } catch (e) {
-        console.error(`  Failed to render tiles for ${dimension}:`, e);
-      }
-    } else {
-      console.log(`No region files for ${dimension}, skipping tile render`);
+    if (!hasRegions) {
+      console.log(`No region files for ${dimension}, skipping`);
     }
 
     try {
       console.log(`Rendering heatmap for ${dimension}...`);
-      await renderHeatmap(dimension);
+      const result = await renderHeatmap(dimension);
+      worldInfo.heatmapDensity[dimension] = {
+        maxPerChunk: result.maxPerChunk,
+        totalPlayers: result.totalPlayers,
+        contoursUrl: result.contoursUrl,
+      };
     } catch (e) {
       console.error(`  Failed to render heatmap for ${dimension}:`, e);
     }

@@ -1,7 +1,7 @@
 import type { WorldInfo, PlayersResponse } from '../shared/protocol';
 import { dimensionSlug } from '../shared/constants';
 import { apiUrl } from './api';
-import { initMap, setBlockMap, setHeatmap, getMap } from './map';
+import { initMap, setBlockMap, setHeatmap, setHeatmapLegend, loadContours, getMap } from './map';
 import { initSearch } from './search';
 import { initFilters } from './filters';
 import { initSidebar } from './sidebar';
@@ -30,6 +30,15 @@ async function init(): Promise<void> {
     setBlockMap(defaultDim, worldInfo);
     const slug = dimensionSlug(defaultDim);
     setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
+
+    // 4b. Show heatmap legend and contour lines
+    if (worldInfo.heatmapDensity?.[defaultDim]) {
+      const density = worldInfo.heatmapDensity[defaultDim];
+      setHeatmapLegend(density.maxPerChunk, density.totalPlayers);
+      if (density.contoursUrl) {
+        loadContours(density.contoursUrl);
+      }
+    }
 
     // 5. Initialize filters (dimension toggles, date, layers)
     initFilters(worldInfo);
@@ -67,9 +76,10 @@ async function init(): Promise<void> {
       });
     }
 
-    // 9. Load players for dot display
+    // 9. Load players for dot display (last 30 days only)
     try {
-      const playersRes = await fetch(apiUrl('/api/players?limit=500000'));
+      const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const playersRes = await fetch(apiUrl(`/api/players?limit=500000&after=${thirtyDaysAgo}`));
       const data: PlayersResponse = await playersRes.json();
       setPlayers(data.players);
     } catch (e) {

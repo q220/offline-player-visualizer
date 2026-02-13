@@ -20,6 +20,8 @@ export interface WorldInfo {
     maxZ: number;
   };
   spawn?: { x: number; z: number };
+  /** Per-dimension heatmap density info for the legend */
+  heatmapDensity?: Record<string, { maxPerChunk: number; totalPlayers: number; contoursUrl: string }>;
 }
 
 export interface PlayersResponse {
@@ -35,8 +37,25 @@ export interface HeatmapRenderRequest {
   dimension: string;
   afterDate?: number;
   beforeDate?: number;
+  /** Viewport bounds — when provided, heatmap is normalized to this area only */
+  viewport?: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
 }
 
 export interface HeatmapRenderResponse {
   url: string;
+  contoursUrl: string;
+  maxPerChunk: number;
+  totalPlayers: number;
+}
+
+export interface ContourData {
+  levels: {
+    value: number;
+    lines: number[][][];
+  }[];
 }

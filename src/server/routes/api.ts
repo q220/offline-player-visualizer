@@ -102,9 +102,14 @@ export async function registerApiRoutes(
   app.post<{
     Body: HeatmapRenderRequest;
   }>('/api/heatmap/render', async (req) => {
-    const { dimension, afterDate, beforeDate } = req.body;
+    const { dimension, afterDate, beforeDate, viewport } = req.body;
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const url = await renderHeatmap(dimension, { afterDate, beforeDate, id });
-    return { url };
+    const result = await renderHeatmap(dimension, { afterDate, beforeDate, viewport, id });
+    return {
+      url: result.url,
+      contoursUrl: result.contoursUrl,
+      maxPerChunk: result.maxPerChunk,
+      totalPlayers: result.totalPlayers,
+    };
   });
 }
