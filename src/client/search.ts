@@ -1,4 +1,5 @@
 import type { PlayerRecord } from '../shared/protocol';
+import { apiUrl } from './api';
 import { flyTo, addPlayerMarker, clearPlayerMarkers } from './map';
 
 let searchTimeout: ReturnType<typeof setTimeout>;
@@ -32,7 +33,7 @@ export function initSearch(): void {
 async function performSearch(query: string): Promise<void> {
   try {
     const res = await fetch(
-      `/api/players/search?q=${encodeURIComponent(query)}&limit=20`,
+      apiUrl(`/api/players/search?q=${encodeURIComponent(query)}&limit=20`),
     );
     const data = await res.json();
     showResults(data.results);

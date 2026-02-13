@@ -1,4 +1,5 @@
 import type { WorldInfo, HeatmapRenderResponse } from '../shared/protocol';
+import { apiUrl } from './api';
 import {
   setBlockMap,
   setHeatmap,
@@ -74,7 +75,7 @@ export function initFilters(info: WorldInfo): void {
       : undefined;
 
     try {
-      const res = await fetch('/api/heatmap/render', {
+      const res = await fetch(apiUrl('/api/heatmap/render'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -84,7 +85,7 @@ export function initFilters(info: WorldInfo): void {
         }),
       });
       const data: HeatmapRenderResponse = await res.json();
-      setHeatmap(data.url, worldInfo);
+      setHeatmap(apiUrl(data.url), worldInfo);
     } catch (e) {
       console.error('Failed to re-render heatmap:', e);
     }
@@ -94,7 +95,7 @@ export function initFilters(info: WorldInfo): void {
     afterInput.value = '';
     beforeInput.value = '';
     const slug = dimensionSlug(currentDimension);
-    setHeatmap(`/static/heatmap-${slug}.png`, worldInfo);
+    setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
   });
 }
 
@@ -102,7 +103,7 @@ function setDimension(dim: string): void {
   currentDimension = dim;
   setBlockMap(dim, worldInfo);
   const slug = dimensionSlug(dim);
-  setHeatmap(`/static/heatmap-${slug}.png`, worldInfo);
+  setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
 }
 
 export function getCurrentDimension(): string {

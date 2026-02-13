@@ -1,4 +1,5 @@
 import type { WorldInfo } from '../shared/protocol';
+import { apiUrl } from './api';
 
 declare const L: typeof import('leaflet');
 
@@ -38,7 +39,7 @@ export function setBlockMap(dimension: string, worldInfo: WorldInfo): void {
   ];
 
   const slug = dimension.replace('minecraft:', '');
-  const url = `/static/map-${slug}.png?t=${Date.now()}`;
+  const url = apiUrl(`/static/map-${slug}.png`) + `?t=${Date.now()}`;
 
   if (blockMapLayer) {
     map.removeLayer(blockMapLayer);
