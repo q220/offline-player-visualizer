@@ -1,11 +1,12 @@
-import type { WorldInfo, PlayersResponse } from '../shared/protocol';
+import type { WorldInfo } from '../shared/protocol';
 import { dimensionSlug } from '../shared/constants';
 import { apiUrl } from './api';
-import { initMap, setBlockMap, setHeatmap, setHeatmapLegend, loadContours, getMap } from './map';
+import { initMap, setBlockMap, setHeatmap, setHeatmapLegend, loadContours } from './map';
 import { initSearch } from './search';
 import { initFilters } from './filters';
 import { initSidebar } from './sidebar';
-import { initPlayerLayer, setPlayers, setPlayerDimension } from './player-layer';
+import { initPlayerLayer, setPlayerDimension } from './player-layer';
+import { initStatus } from './status';
 
 declare const L: typeof import('leaflet');
 
@@ -20,10 +21,13 @@ async function init(): Promise<void> {
     // 2. Initialize map
     const map = initMap(worldInfo);
 
-    // 3. Initialize sidebar
+    // 3. Initialize status bar (must be before modules that produce status)
+    initStatus();
+
+    // 4. Initialize sidebar
     initSidebar(worldInfo);
 
-    // 4. Prefer overworld as default, fall back to first available
+    // 5. Prefer overworld as default, fall back to first available
     const defaultDim = worldInfo.dimensions.includes('minecraft:overworld')
       ? 'minecraft:overworld'
       : worldInfo.dimensions[0] || 'minecraft:overworld';
@@ -31,7 +35,7 @@ async function init(): Promise<void> {
     const slug = dimensionSlug(defaultDim);
     setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
 
-    // 4b. Show heatmap legend and contour lines
+    // 5b. Show heatmap legend and contour lines
     if (worldInfo.heatmapDensity?.[defaultDim]) {
       const density = worldInfo.heatmapDensity[defaultDim];
       setHeatmapLegend(density.maxPerChunk, density.totalPlayers);
@@ -40,17 +44,17 @@ async function init(): Promise<void> {
       }
     }
 
-    // 5. Initialize filters (dimension toggles, date, layers)
+    // 6. Initialize filters (dimension toggles, date, layers)
     initFilters(worldInfo);
 
-    // 6. Initialize search
+    // 7. Initialize search
     initSearch();
 
-    // 7. Initialize player dot layer with matching dimension
+    // 8. Initialize player layer — fetches clusters from server per viewport
     initPlayerLayer(worldInfo);
     setPlayerDimension(defaultDim);
 
-    // 8. Add spawn point marker if available
+    // 9. Add spawn point marker if available
     if (worldInfo.spawn) {
       const spawnIcon = L.divIcon({
         className: 'spawn-marker',
@@ -74,16 +78,6 @@ async function init(): Promise<void> {
         offset: [0, -10],
         className: 'spawn-label',
       });
-    }
-
-    // 9. Load players for dot display (last 30 days only)
-    try {
-      const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-      const playersRes = await fetch(apiUrl(`/api/players?limit=500000&after=${thirtyDaysAgo}`));
-      const data: PlayersResponse = await playersRes.json();
-      setPlayers(data.players);
-    } catch (e) {
-      console.warn('Failed to load player data for dots:', e);
     }
 
     // 10. Set up coordinate display on hover

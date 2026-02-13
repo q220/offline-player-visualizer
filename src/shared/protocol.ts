@@ -59,3 +59,32 @@ export interface ContourData {
     lines: number[][][];
   }[];
 }
+
+/** Server-side clustering types */
+
+export interface ClusterItem {
+  type: 'cluster';
+  x: number;
+  z: number;
+  count: number;
+  /** Up to 5 sample player names for the popup */
+  names: string[];
+}
+
+export interface PlayerItem {
+  type: 'player';
+  uuid: string;
+  name?: string;
+  x: number;
+  z: number;
+  y: number;
+}
+
+export interface ClustersResponse {
+  /** Total individual players in viewport (before clustering) */
+  totalInView: number;
+  items: (ClusterItem | PlayerItem)[];
+}
+
+/** Default number of days to show players for */
+export const DEFAULT_PLAYER_DAYS = 30;

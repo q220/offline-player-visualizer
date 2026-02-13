@@ -1,4 +1,5 @@
 import type { WorldInfo, HeatmapRenderResponse } from '../shared/protocol';
+import { DEFAULT_PLAYER_DAYS } from '../shared/protocol';
 import { apiUrl } from './api';
 import {
   setBlockMap,
@@ -9,13 +10,15 @@ import {
   toggleBlockMapVisibility,
   getMap,
 } from './map';
-import { setPlayerDimension } from './player-layer';
+import { setPlayerDimension, setPlayerDateFilter } from './player-layer';
 import { dimensionSlug } from '../shared/constants';
+import { setStatus, clearStatus } from './status';
 
 let currentDimension = 'minecraft:overworld';
 let worldInfo: WorldInfo;
 let viewportTimer: ReturnType<typeof setTimeout> | null = null;
 let viewportRenderInFlight = false;
+let filterInfoEl: HTMLDivElement;
 
 export function initFilters(info: WorldInfo): void {
   worldInfo = info;
@@ -61,12 +64,18 @@ export function initFilters(info: WorldInfo): void {
     toggleBlockMapVisibility(toggleBlockmapEl.checked);
   });
 
-  // Date filter
-  const applyBtn = document.getElementById('apply-date-filter')!;
-  const clearBtn = document.getElementById('clear-date-filter')!;
+  // Date filter elements
+  const applyBtn = document.getElementById('apply-date-filter')! as HTMLButtonElement;
+  const clearBtn = document.getElementById('clear-date-filter')! as HTMLButtonElement;
+  const showAllBtn = document.getElementById('show-all-players')! as HTMLButtonElement;
   const afterInput = document.getElementById('date-after') as HTMLInputElement;
   const beforeInput = document.getElementById('date-before') as HTMLInputElement;
+  filterInfoEl = document.getElementById('filter-info') as HTMLDivElement;
 
+  // Show initial filter state
+  updateFilterInfo('default');
+
+  // Apply date filter → both heatmap and player dots
   applyBtn.addEventListener('click', async () => {
     const afterDate = afterInput.value
       ? new Date(afterInput.value).getTime()
@@ -74,6 +83,13 @@ export function initFilters(info: WorldInfo): void {
     const beforeDate = beforeInput.value
       ? new Date(beforeInput.value).getTime()
       : undefined;
+
+    applyBtn.classList.add('loading');
+    applyBtn.disabled = true;
+    setStatus('heatmap-render', 'Rendering heatmap with date filter...');
+
+    // Update player dots with same filter
+    setPlayerDateFilter(afterDate, beforeDate);
 
     try {
       const res = await fetch(apiUrl('/api/heatmap/render'), {
@@ -91,11 +107,19 @@ export function initFilters(info: WorldInfo): void {
       if (data.contoursUrl) {
         loadContours(data.contoursUrl);
       }
+
+      // Update label
+      updateFilterInfo('custom', afterInput.value, beforeInput.value);
     } catch (e) {
       console.error('Failed to re-render heatmap:', e);
+    } finally {
+      applyBtn.classList.remove('loading');
+      applyBtn.disabled = false;
+      clearStatus('heatmap-render');
     }
   });
 
+  // Clear → reset to 30-day default
   clearBtn.addEventListener('click', () => {
     afterInput.value = '';
     beforeInput.value = '';
@@ -108,12 +132,74 @@ export function initFilters(info: WorldInfo): void {
         loadContours(density.contoursUrl);
       }
     }
+    // Reset player dots to 30-day default
+    const defaultAfter = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
+    setPlayerDateFilter(defaultAfter, undefined);
+    updateFilterInfo('default');
+  });
+
+  // Show All → no date filter at all
+  showAllBtn.addEventListener('click', async () => {
+    afterInput.value = '';
+    beforeInput.value = '';
+
+    showAllBtn.classList.add('loading');
+    showAllBtn.disabled = true;
+    setStatus('heatmap-render', 'Rendering heatmap for all players...');
+
+    // Remove date filter from player dots
+    setPlayerDateFilter(undefined, undefined);
+
+    try {
+      const res = await fetch(apiUrl('/api/heatmap/render'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dimension: currentDimension,
+        }),
+      });
+      const data: HeatmapRenderResponse = await res.json();
+      setHeatmap(apiUrl(data.url), worldInfo);
+      setHeatmapLegend(data.maxPerChunk, data.totalPlayers);
+      if (data.contoursUrl) {
+        loadContours(data.contoursUrl);
+      }
+
+      updateFilterInfo('all');
+    } catch (e) {
+      console.error('Failed to re-render heatmap:', e);
+    } finally {
+      showAllBtn.classList.remove('loading');
+      showAllBtn.disabled = false;
+      clearStatus('heatmap-render');
+    }
   });
 
   // Viewport-dependent heatmap re-rendering
   const map = getMap();
   map.on('moveend', () => scheduleViewportRender());
   map.on('zoomend', () => scheduleViewportRender());
+}
+
+function updateFilterInfo(
+  mode: 'default' | 'custom' | 'all',
+  afterStr?: string,
+  beforeStr?: string,
+): void {
+  if (!filterInfoEl) return;
+
+  if (mode === 'all') {
+    filterInfoEl.textContent = 'Showing all players (all time)';
+  } else if (mode === 'custom') {
+    const parts: string[] = [];
+    if (afterStr) parts.push(`from ${afterStr}`);
+    if (beforeStr) parts.push(`to ${beforeStr}`);
+    filterInfoEl.textContent = parts.length > 0
+      ? `Showing players ${parts.join(' ')}`
+      : `Showing players from the last ${DEFAULT_PLAYER_DAYS} days`;
+  } else {
+    filterInfoEl.textContent = `Showing players from the last ${DEFAULT_PLAYER_DAYS} days`;
+  }
 }
 
 function setDimension(dim: string): void {
@@ -142,8 +228,6 @@ async function renderForViewport(): Promise<void> {
   const map = getMap();
   const zoom = map.getZoom();
 
-  // Only do viewport-dependent rendering when zoomed in enough
-  // At overview zoom, the global heatmap is fine
   if (zoom < -1) return;
 
   const bounds = map.getBounds();
@@ -154,7 +238,6 @@ async function renderForViewport(): Promise<void> {
     maxZ: Math.ceil(bounds.getNorth()),
   };
 
-  // Don't re-render if viewport covers most of the world
   const worldW = worldInfo.bounds.maxX - worldInfo.bounds.minX;
   const worldH = worldInfo.bounds.maxZ - worldInfo.bounds.minZ;
   const vpW = viewport.maxX - viewport.minX;
@@ -162,6 +245,7 @@ async function renderForViewport(): Promise<void> {
   if (vpW >= worldW * 0.8 && vpH >= worldH * 0.8) return;
 
   viewportRenderInFlight = true;
+  setStatus('heatmap-viewport', 'Refining heatmap for viewport...');
   try {
     const res = await fetch(apiUrl('/api/heatmap/render'), {
       method: 'POST',
@@ -181,6 +265,7 @@ async function renderForViewport(): Promise<void> {
     console.warn('Viewport heatmap render failed:', e);
   } finally {
     viewportRenderInFlight = false;
+    clearStatus('heatmap-viewport');
   }
 }
 

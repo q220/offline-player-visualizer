@@ -1,5 +1,6 @@
 import type { WorldInfo, ContourData } from '../shared/protocol';
 import { apiUrl } from './api';
+import { setStatus, clearStatus } from './status';
 
 declare const L: typeof import('leaflet');
 
@@ -75,6 +76,35 @@ export function setBlockMap(dimension: string, _worldInfo: WorldInfo): void {
     keepBuffer: 4,
     updateWhenZooming: false,
   }).addTo(map);
+
+  // Tile loading progress
+  let pendingTiles = 0;
+  let loadedTiles = 0;
+
+  blockMapLayer.on('loading', () => {
+    pendingTiles = 0;
+    loadedTiles = 0;
+    setStatus('tiles', 'Loading map tiles...');
+  });
+
+  blockMapLayer.on('tileloadstart', () => {
+    pendingTiles++;
+    setStatus('tiles', `Loading map tiles (${loadedTiles}/${pendingTiles})...`);
+  });
+
+  blockMapLayer.on('tileload', () => {
+    loadedTiles++;
+    setStatus('tiles', `Loading map tiles (${loadedTiles}/${pendingTiles})...`);
+  });
+
+  blockMapLayer.on('tileerror', () => {
+    loadedTiles++;
+    setStatus('tiles', `Loading map tiles (${loadedTiles}/${pendingTiles})...`);
+  });
+
+  blockMapLayer.on('load', () => {
+    clearStatus('tiles');
+  });
 }
 
 export function setHeatmap(

@@ -98,6 +98,32 @@ export async function registerApiRoutes(
     }
   });
 
+  // Server-side clustered players for viewport
+  app.get<{
+    Querystring: {
+      dimension: string;
+      zoom: string;
+      minX: string;
+      maxX: string;
+      minZ: string;
+      maxZ: string;
+      after?: string;
+      before?: string;
+    };
+  }>('/api/players/clusters', async (req) => {
+    const { dimension, zoom, minX, maxX, minZ, maxZ, after, before } = req.query;
+    return playerStore.getClusters({
+      dimension,
+      zoom: parseFloat(zoom),
+      minX: parseFloat(minX),
+      maxX: parseFloat(maxX),
+      minZ: parseFloat(minZ),
+      maxZ: parseFloat(maxZ),
+      after: after ? parseInt(after) : undefined,
+      before: before ? parseInt(before) : undefined,
+    });
+  });
+
   // Re-render heatmap with filters
   app.post<{
     Body: HeatmapRenderRequest;

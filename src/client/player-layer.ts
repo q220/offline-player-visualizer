@@ -1,23 +1,42 @@
-import type { PlayerRecord, WorldInfo } from '../shared/protocol';
+import type { WorldInfo, ClustersResponse } from '../shared/protocol';
+import { DEFAULT_PLAYER_DAYS } from '../shared/protocol';
+import { apiUrl } from './api';
 import { getMap } from './map';
+import { setStatus, clearStatus } from './status';
 
 declare const L: typeof import('leaflet');
 
 let clusterLayer: L.LayerGroup;
-let allPlayers: PlayerRecord[] = [];
 let currentDimension = '';
+let afterFilter: number | undefined;
+let beforeFilter: number | undefined;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let abortController: AbortController | null = null;
+let viewportCountControl: L.Control | null = null;
+let viewportCountEl: HTMLDivElement | null = null;
 
-export function initPlayerLayer(worldInfo: WorldInfo): void {
+/** Set to the default 30-day window initially */
+afterFilter = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
+
+export function initPlayerLayer(_worldInfo: WorldInfo): void {
   const map = getMap();
   clusterLayer = L.layerGroup().addTo(map);
 
-  map.on('zoomend', refresh);
-  map.on('moveend', refresh);
-}
+  // Create viewport count control
+  const CountControl = L.Control.extend({
+    onAdd() {
+      const div = L.DomUtil.create('div', 'viewport-count');
+      div.innerHTML = '<span class="count-number">-</span><span class="count-label"> players in view</span>';
+      L.DomEvent.disableClickPropagation(div);
+      viewportCountEl = div;
+      return div;
+    },
+  });
+  viewportCountControl = new CountControl({ position: 'topright' });
+  viewportCountControl.addTo(map);
 
-export function setPlayers(players: PlayerRecord[]): void {
-  allPlayers = players;
-  refresh();
+  map.on('zoomend', scheduleRefresh);
+  map.on('moveend', scheduleRefresh);
 }
 
 export function setPlayerDimension(dim: string): void {
@@ -25,124 +44,141 @@ export function setPlayerDimension(dim: string): void {
   refresh();
 }
 
-function refresh(): void {
-  clusterLayer.clearLayers();
+/** Called by filters.ts when date filter changes */
+export function setPlayerDateFilter(after?: number, before?: number): void {
+  afterFilter = after;
+  beforeFilter = before;
+  refresh();
+}
+
+/** Get the current date filter state (used by filters.ts for heatmap sync) */
+export function getPlayerDateFilter(): { after?: number; before?: number } {
+  return { after: afterFilter, before: beforeFilter };
+}
+
+function scheduleRefresh(): void {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refresh, 300);
+}
+
+async function refresh(): Promise<void> {
   const map = getMap();
-  const zoom = map.getZoom();
+  if (!currentDimension) return;
+
+  // Abort any in-flight request
+  if (abortController) {
+    abortController.abort();
+  }
+  abortController = new AbortController();
+
   const bounds = map.getBounds();
+  const zoom = map.getZoom();
 
-  // Filter to visible players in current dimension
-  const visible = allPlayers.filter(
-    (p) =>
-      p.dimension === currentDimension &&
-      p.z >= bounds.getSouth() &&
-      p.z <= bounds.getNorth() &&
-      p.x >= bounds.getWest() &&
-      p.x <= bounds.getEast(),
-  );
+  const params = new URLSearchParams({
+    dimension: currentDimension,
+    zoom: zoom.toString(),
+    minX: Math.floor(bounds.getWest()).toString(),
+    maxX: Math.ceil(bounds.getEast()).toString(),
+    minZ: Math.floor(bounds.getSouth()).toString(),
+    maxZ: Math.ceil(bounds.getNorth()).toString(),
+  });
 
-  if (visible.length === 0) return;
+  if (afterFilter) params.set('after', afterFilter.toString());
+  if (beforeFilter) params.set('before', beforeFilter.toString());
 
-  // At high zoom, show individual dots
-  // At low zoom, show grid-clustered circles
-  if (zoom >= 2) {
-    showDots(visible, zoom);
-  } else {
-    showClusters(visible, zoom);
+  setStatus('players', 'Loading players...');
+
+  try {
+    const res = await fetch(
+      apiUrl(`/api/players/clusters?${params}`),
+      { signal: abortController.signal },
+    );
+    const data: ClustersResponse = await res.json();
+
+    clusterLayer.clearLayers();
+    renderItems(data, zoom);
+    updateViewportCount(data.totalInView);
+  } catch (e: any) {
+    if (e.name === 'AbortError') return; // superseded by newer request
+    console.warn('Failed to load player clusters:', e);
+  } finally {
+    clearStatus('players');
   }
 }
 
-function showDots(players: PlayerRecord[], zoom: number): void {
-  const map = getMap();
+function renderItems(data: ClustersResponse, zoom: number): void {
   const radius = Math.max(2, Math.min(6, zoom + 1));
-  const limit = Math.min(players.length, 8000);
 
-  for (let i = 0; i < limit; i++) {
-    const p = players[i];
-    const dot = L.circleMarker(L.latLng(p.z, p.x), {
-      radius,
-      color: '#fff',
-      fillColor: '#e94560',
-      fillOpacity: 0.8,
-      weight: 1,
-    });
+  for (const item of data.items) {
+    if (item.type === 'player') {
+      const dot = L.circleMarker(L.latLng(item.z, item.x), {
+        radius,
+        color: '#fff',
+        fillColor: '#e94560',
+        fillOpacity: 0.8,
+        weight: 1,
+      });
 
-    dot.bindPopup(
-      `<div class="player-popup">
-        <div class="popup-name">${p.name || 'Unknown'}</div>
-        <div class="popup-info">UUID: ${p.uuid}</div>
-        <div class="popup-info">Pos: ${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)}</div>
-      </div>`,
-    );
+      dot.bindPopup(
+        `<div class="player-popup">
+          <div class="popup-name">${item.name || 'Unknown'}</div>
+          <div class="popup-info">UUID: ${item.uuid}</div>
+          <div class="popup-info">Pos: ${Math.round(item.x)}, ${Math.round(item.y)}, ${Math.round(item.z)}</div>
+        </div>`,
+      );
 
-    clusterLayer.addLayer(dot);
+      clusterLayer.addLayer(dot);
+    } else {
+      // Cluster
+      const clusterRadius = Math.max(6, Math.min(30, 6 + Math.log2(item.count) * 4));
+      const intensity = Math.min(1, Math.log10(item.count) / 3);
+      const color = interpolateColor(intensity);
+
+      const circle = L.circleMarker(L.latLng(item.z, item.x), {
+        radius: clusterRadius,
+        color: '#fff',
+        fillColor: color,
+        fillOpacity: 0.75,
+        weight: 1,
+      });
+
+      const countLabel = item.count >= 1000
+        ? `${(item.count / 1000).toFixed(1)}k`
+        : `${item.count}`;
+
+      const tooltip = L.tooltip({
+        permanent: true,
+        direction: 'center',
+        className: 'cluster-label',
+      }).setContent(countLabel);
+      circle.bindTooltip(tooltip);
+
+      const names = item.names.join(', ');
+      const extra = item.count > item.names.length
+        ? ` and ${item.count - item.names.length} more`
+        : '';
+      circle.bindPopup(
+        `<div class="player-popup">
+          <div class="popup-name">${item.count} players</div>
+          <div class="popup-info">${names}${extra}</div>
+        </div>`,
+      );
+
+      clusterLayer.addLayer(circle);
+    }
   }
 }
 
-function showClusters(players: PlayerRecord[], zoom: number): void {
-  // Grid-based clustering: cell size depends on zoom level
-  const cellSize = zoom <= -2 ? 128 : zoom <= -1 ? 64 : 32;
-  const clusters = new Map<string, { x: number; z: number; count: number; players: PlayerRecord[] }>();
-
-  for (const p of players) {
-    const cx = Math.floor(p.x / cellSize);
-    const cz = Math.floor(p.z / cellSize);
-    const key = `${cx},${cz}`;
-
-    let cluster = clusters.get(key);
-    if (!cluster) {
-      cluster = { x: 0, z: 0, count: 0, players: [] };
-      clusters.set(key, cluster);
-    }
-    cluster.x += p.x;
-    cluster.z += p.z;
-    cluster.count++;
-    if (cluster.players.length < 5) cluster.players.push(p);
-  }
-
-  for (const cluster of clusters.values()) {
-    const avgX = cluster.x / cluster.count;
-    const avgZ = cluster.z / cluster.count;
-
-    // Size based on count (log scale)
-    const radius = Math.max(6, Math.min(30, 6 + Math.log2(cluster.count) * 4));
-
-    // Color intensity based on count
-    const intensity = Math.min(1, Math.log10(cluster.count) / 3);
-    const color = interpolateColor(intensity);
-
-    const circle = L.circleMarker(L.latLng(avgZ, avgX), {
-      radius,
-      color: '#fff',
-      fillColor: color,
-      fillOpacity: 0.75,
-      weight: 1,
-    });
-
-    // Show count label
-    const tooltip = L.tooltip({
-      permanent: true,
-      direction: 'center',
-      className: 'cluster-label',
-    }).setContent(cluster.count >= 1000 ? `${(cluster.count / 1000).toFixed(1)}k` : `${cluster.count}`);
-
-    circle.bindTooltip(tooltip);
-
-    const names = cluster.players.map((p) => p.name || p.uuid.slice(0, 8)).join(', ');
-    const extra = cluster.count > 5 ? ` and ${cluster.count - 5} more` : '';
-    circle.bindPopup(
-      `<div class="player-popup">
-        <div class="popup-name">${cluster.count} players</div>
-        <div class="popup-info">${names}${extra}</div>
-      </div>`,
-    );
-
-    clusterLayer.addLayer(circle);
-  }
+function updateViewportCount(count: number): void {
+  if (!viewportCountEl) return;
+  const formatted = count >= 1000
+    ? `${(count / 1000).toFixed(1)}k`
+    : count.toLocaleString();
+  viewportCountEl.innerHTML =
+    `<span class="count-number">${formatted}</span><span class="count-label"> players in view</span>`;
 }
 
 function interpolateColor(t: number): string {
-  // Blue -> Yellow -> Red
   let r: number, g: number, b: number;
   if (t < 0.5) {
     const s = t / 0.5;
