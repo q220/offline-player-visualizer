@@ -128,25 +128,31 @@ export async function renderHeatmap(
   const blurred = gaussianBlurFloat32(density, chunkW, chunkH, blurSigma);
   console.log(`  Gaussian blur (${(performance.now() - t1).toFixed(0)}ms)`);
 
-  // Normalize — if viewport is given, normalize to the viewport area only
-  let maxBlurred = 0;
+  // Compute global max first (always needed as a floor for viewport normalization)
+  let globalMaxBlurred = 0;
+  for (let i = 0; i < blurred.length; i++) {
+    if (blurred[i] > globalMaxBlurred) globalMaxBlurred = blurred[i];
+  }
+
+  // Normalize — viewport-aware with a global floor to prevent over-saturation
+  let maxBlurred = globalMaxBlurred;
   if (opts?.viewport) {
     const vp = opts.viewport;
     const vpMinCX = Math.max(0, Math.floor((vp.minX - minX) / CHUNK_SIZE));
     const vpMaxCX = Math.min(chunkW, Math.ceil((vp.maxX - minX) / CHUNK_SIZE));
     const vpMinCZ = Math.max(0, Math.floor((vp.minZ - minZ) / CHUNK_SIZE));
     const vpMaxCZ = Math.min(chunkH, Math.ceil((vp.maxZ - minZ) / CHUNK_SIZE));
+    let viewportMax = 0;
     for (let cz = vpMinCZ; cz < vpMaxCZ; cz++) {
       for (let cx = vpMinCX; cx < vpMaxCX; cx++) {
         const v = blurred[cz * chunkW + cx];
-        if (v > maxBlurred) maxBlurred = v;
+        if (v > viewportMax) viewportMax = v;
       }
     }
-    console.log(`  Viewport normalization: chunks [${vpMinCX}..${vpMaxCX}] x [${vpMinCZ}..${vpMaxCZ}], maxBlurred=${maxBlurred.toFixed(4)}`);
-  } else {
-    for (let i = 0; i < blurred.length; i++) {
-      if (blurred[i] > maxBlurred) maxBlurred = blurred[i];
-    }
+    // Use viewport max but floor at 15% of global max to prevent cold areas
+    // from over-saturating (everything turning red when zoomed into empty space)
+    maxBlurred = Math.max(viewportMax, globalMaxBlurred * 0.15);
+    console.log(`  Viewport normalization: chunks [${vpMinCX}..${vpMaxCX}] x [${vpMinCZ}..${vpMaxCZ}], viewportMax=${viewportMax.toFixed(4)}, floor=${(globalMaxBlurred * 0.15).toFixed(4)}, effective=${maxBlurred.toFixed(4)}`);
   }
 
   if (maxBlurred === 0) {

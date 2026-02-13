@@ -17,7 +17,7 @@ import { setStatus, clearStatus } from './status';
 let currentDimension = 'minecraft:overworld';
 let worldInfo: WorldInfo;
 let viewportTimer: ReturnType<typeof setTimeout> | null = null;
-let viewportRenderInFlight = false;
+let viewportAbortController: AbortController | null = null;
 let filterInfoEl: HTMLDivElement;
 
 export function initFilters(info: WorldInfo): void {
@@ -219,17 +219,11 @@ function setDimension(dim: string): void {
 
 function scheduleViewportRender(): void {
   if (viewportTimer) clearTimeout(viewportTimer);
-  viewportTimer = setTimeout(() => renderForViewport(), 800);
+  viewportTimer = setTimeout(() => renderForViewport(), 500);
 }
 
 async function renderForViewport(): Promise<void> {
-  if (viewportRenderInFlight) return;
-
   const map = getMap();
-  const zoom = map.getZoom();
-
-  if (zoom < -1) return;
-
   const bounds = map.getBounds();
   const viewport = {
     minX: Math.floor(bounds.getWest()),
@@ -238,13 +232,19 @@ async function renderForViewport(): Promise<void> {
     maxZ: Math.ceil(bounds.getNorth()),
   };
 
+  // Skip if viewport covers nearly the entire world (result ≈ startup heatmap)
   const worldW = worldInfo.bounds.maxX - worldInfo.bounds.minX;
   const worldH = worldInfo.bounds.maxZ - worldInfo.bounds.minZ;
   const vpW = viewport.maxX - viewport.minX;
   const vpH = viewport.maxZ - viewport.minZ;
-  if (vpW >= worldW * 0.8 && vpH >= worldH * 0.8) return;
+  if (vpW >= worldW * 0.95 && vpH >= worldH * 0.95) return;
 
-  viewportRenderInFlight = true;
+  // Cancel any in-flight viewport render
+  if (viewportAbortController) {
+    viewportAbortController.abort();
+  }
+  viewportAbortController = new AbortController();
+
   setStatus('heatmap-viewport', 'Refining heatmap for viewport...');
   try {
     const res = await fetch(apiUrl('/api/heatmap/render'), {
@@ -254,6 +254,7 @@ async function renderForViewport(): Promise<void> {
         dimension: currentDimension,
         viewport,
       }),
+      signal: viewportAbortController.signal,
     });
     const data: HeatmapRenderResponse = await res.json();
     setHeatmap(apiUrl(data.url), worldInfo);
@@ -261,10 +262,12 @@ async function renderForViewport(): Promise<void> {
     if (data.contoursUrl) {
       loadContours(data.contoursUrl);
     }
-  } catch (e) {
-    console.warn('Viewport heatmap render failed:', e);
+  } catch (e: any) {
+    if (e.name !== 'AbortError') {
+      console.warn('Viewport heatmap render failed:', e);
+    }
   } finally {
-    viewportRenderInFlight = false;
+    viewportAbortController = null;
     clearStatus('heatmap-viewport');
   }
 }
