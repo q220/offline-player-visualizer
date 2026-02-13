@@ -10,7 +10,7 @@ import {
   toggleBlockMapVisibility,
   getMap,
 } from './map';
-import { setPlayerDimension, setPlayerDateFilter } from './player-layer';
+import { setPlayerDimension, setPlayerDateFilter, getPlayerDateFilter } from './player-layer';
 import { dimensionSlug } from '../shared/constants';
 import { setStatus, clearStatus } from './status';
 
@@ -206,6 +206,9 @@ function setDimension(dim: string): void {
   currentDimension = dim;
   setBlockMap(dim, worldInfo);
   setPlayerDimension(dim);
+
+  // Load pre-rendered heatmap (rendered with default 30-day filter)
+  setStatus('heatmap-dimension', 'Loading heatmap...');
   const slug = dimensionSlug(dim);
   setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
   if (worldInfo.heatmapDensity?.[dim]) {
@@ -215,6 +218,7 @@ function setDimension(dim: string): void {
       loadContours(density.contoursUrl);
     }
   }
+  clearStatus('heatmap-dimension');
 }
 
 function scheduleViewportRender(): void {
@@ -245,6 +249,9 @@ async function renderForViewport(): Promise<void> {
   }
   viewportAbortController = new AbortController();
 
+  // Include active date filter so the heatmap matches the player dots
+  const dateFilter = getPlayerDateFilter();
+
   setStatus('heatmap-viewport', 'Refining heatmap for viewport...');
   try {
     const res = await fetch(apiUrl('/api/heatmap/render'), {
@@ -253,6 +260,8 @@ async function renderForViewport(): Promise<void> {
       body: JSON.stringify({
         dimension: currentDimension,
         viewport,
+        afterDate: dateFilter.after,
+        beforeDate: dateFilter.before,
       }),
       signal: viewportAbortController.signal,
     });

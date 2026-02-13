@@ -12,6 +12,7 @@ import { renderHeatmap } from './services/heatmap-renderer.js';
 import { preRenderTiles } from './services/map-renderer.js';
 import { listRegionFiles, scanRegions, type RegionInfo } from './services/region-loader.js';
 import { registerApiRoutes } from './routes/api.js';
+import { DEFAULT_PLAYER_DAYS } from '../shared/protocol.js';
 
 async function main() {
   const worldPath = config.worldPath;
@@ -80,7 +81,8 @@ async function main() {
   // Compute bounds from region files + player positions
   const dimensionRegions = computeDynamicBounds(worldPath, worldInfo);
 
-  // 4. Pre-render heatmaps
+  // 4. Pre-render heatmaps (with default 30-day filter to match client default)
+  const defaultAfterDate = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
   worldInfo.heatmapDensity = {};
   for (const dimension of worldInfo.dimensions) {
     const hasRegions = listRegionFiles(worldPath, dimension).length > 0;
@@ -89,8 +91,8 @@ async function main() {
     }
 
     try {
-      console.log(`Rendering heatmap for ${dimension}...`);
-      const result = await renderHeatmap(dimension);
+      console.log(`Rendering heatmap for ${dimension} (last ${DEFAULT_PLAYER_DAYS} days)...`);
+      const result = await renderHeatmap(dimension, { afterDate: defaultAfterDate });
       worldInfo.heatmapDensity[dimension] = {
         maxPerChunk: result.maxPerChunk,
         totalPlayers: result.totalPlayers,

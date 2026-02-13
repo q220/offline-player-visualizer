@@ -6,7 +6,7 @@ import { initSearch } from './search';
 import { initFilters } from './filters';
 import { initSidebar } from './sidebar';
 import { initPlayerLayer, setPlayerDimension } from './player-layer';
-import { initStatus } from './status';
+import { initStatus, setStatus, clearStatus } from './status';
 
 declare const L: typeof import('leaflet');
 
@@ -32,6 +32,9 @@ async function init(): Promise<void> {
       ? 'minecraft:overworld'
       : worldInfo.dimensions[0] || 'minecraft:overworld';
     setBlockMap(defaultDim, worldInfo);
+
+    // Load heatmap (pre-rendered on server with default 30-day filter)
+    setStatus('heatmap-init', 'Loading heatmap...');
     const slug = dimensionSlug(defaultDim);
     setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
 
@@ -43,6 +46,7 @@ async function init(): Promise<void> {
         loadContours(density.contoursUrl);
       }
     }
+    clearStatus('heatmap-init');
 
     // 6. Initialize filters (dimension toggles, date, layers)
     initFilters(worldInfo);
