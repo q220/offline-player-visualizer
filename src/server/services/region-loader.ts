@@ -67,3 +67,55 @@ export function parseRegionCoords(filename: string): { rx: number; rz: number } 
   if (!match) return null;
   return { rx: parseInt(match[1]), rz: parseInt(match[2]) };
 }
+
+/**
+ * Count populated chunks in a region file by reading the 4KB header.
+ * Each .mca header has 1024 4-byte entries; non-zero = chunk exists.
+ * This is very fast — no chunk data is read.
+ */
+export function countRegionChunks(filepath: string): number {
+  try {
+    const fd = fs.openSync(filepath, 'r');
+    const header = Buffer.alloc(4096);
+    fs.readSync(fd, header, 0, 4096, 0);
+    fs.closeSync(fd);
+
+    let count = 0;
+    for (let i = 0; i < 1024; i++) {
+      // Each entry is 4 bytes: 3 bytes offset + 1 byte sector count
+      // If the offset (first 3 bytes) is non-zero, the chunk exists
+      if (header[i * 4] !== 0 || header[i * 4 + 1] !== 0 || header[i * 4 + 2] !== 0) {
+        count++;
+      }
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
+export interface RegionInfo {
+  rx: number;
+  rz: number;
+  chunks: number;
+  filepath: string;
+}
+
+/**
+ * Scan all region files for a dimension and return info sorted by chunk count.
+ */
+export function scanRegions(worldPath: string, dimension: string): RegionInfo[] {
+  const files = listRegionFiles(worldPath, dimension);
+  const regions: RegionInfo[] = [];
+
+  for (const f of files) {
+    const coords = parseRegionCoords(f);
+    if (!coords) continue;
+    const chunks = countRegionChunks(f);
+    if (chunks > 0) {
+      regions.push({ ...coords, chunks, filepath: f });
+    }
+  }
+
+  return regions;
+}

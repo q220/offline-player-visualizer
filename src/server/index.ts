@@ -10,7 +10,7 @@ import { indexPlayers } from './services/player-indexer.js';
 import { playerStore } from './services/player-store.js';
 // renderBlockMap no longer used — tiles are rendered on-demand
 import { renderHeatmap } from './services/heatmap-renderer.js';
-import { listRegionFiles, parseRegionCoords } from './services/region-loader.js';
+import { listRegionFiles, scanRegions } from './services/region-loader.js';
 import { registerApiRoutes } from './routes/api.js';
 
 async function main() {
@@ -178,43 +178,75 @@ async function main() {
 
 /**
  * Compute map bounds from region files and player positions.
- * Updates config.bounds and worldInfo.bounds to cover everything.
+ * Uses chunk density analysis to exclude sparse/corrupt regions that would
+ * inflate the world size (common in hub worlds with legacy data).
  */
 function computeDynamicBounds(worldPath: string, worldInfo: import('../shared/protocol.js').WorldInfo): void {
   let minX = Infinity, maxX = -Infinity;
   let minZ = Infinity, maxZ = -Infinity;
 
   // Sharp pixel limit is ~268M pixels. Cap to 16384x16384 = 268M to stay safe.
-  // Memory: 16384^2 * 4 bytes = 1GB for pixel buffer alone, so use a practical cap.
   const MAX_MAP_SIZE = 10000; // 10000x10000 = 100M pixels, ~400MB pixel buffer
 
-  // Include region file coverage (each region = 32 chunks = 512 blocks)
+  // Minimum chunks for a region to be considered "substantial" (~3% of 1024 max)
+  const MIN_CHUNKS_THRESHOLD = 32;
+
+  // Scan regions with chunk density analysis
   let regionMinX = Infinity, regionMaxX = -Infinity;
   let regionMinZ = Infinity, regionMaxZ = -Infinity;
+
   for (const dim of worldInfo.dimensions) {
-    const regionFiles = listRegionFiles(worldPath, dim);
-    for (const f of regionFiles) {
-      const coords = parseRegionCoords(f);
-      if (coords) {
-        const rMinX = coords.rx * 512;
-        const rMaxX = rMinX + 512;
-        const rMinZ = coords.rz * 512;
-        const rMaxZ = rMinZ + 512;
-        if (rMinX < regionMinX) regionMinX = rMinX;
-        if (rMaxX > regionMaxX) regionMaxX = rMaxX;
-        if (rMinZ < regionMinZ) regionMinZ = rMinZ;
-        if (rMaxZ > regionMaxZ) regionMaxZ = rMaxZ;
+    const regions = scanRegions(worldPath, dim);
+    if (regions.length === 0) continue;
+
+    // Sort by chunk count descending for logging
+    regions.sort((a, b) => b.chunks - a.chunks);
+
+    const totalChunks = regions.reduce((sum, r) => sum + r.chunks, 0);
+    const substantial = regions.filter(r => r.chunks >= MIN_CHUNKS_THRESHOLD);
+    const sparse = regions.length - substantial.length;
+    const substantialChunks = substantial.reduce((sum, r) => sum + r.chunks, 0);
+
+    console.log(`  Region density [${dim}]: ${regions.length} regions, ${totalChunks} total chunks`);
+    console.log(`    Substantial (>=${MIN_CHUNKS_THRESHOLD} chunks): ${substantial.length} regions, ${substantialChunks} chunks`);
+    if (sparse > 0) {
+      const sparseChunks = totalChunks - substantialChunks;
+      console.log(`    Sparse/corrupt (<${MIN_CHUNKS_THRESHOLD} chunks): ${sparse} regions, ${sparseChunks} chunks — excluded from bounds`);
+    }
+
+    // Log distribution: top 5 and bottom 5
+    if (regions.length > 0) {
+      const top = regions.slice(0, Math.min(5, regions.length));
+      const topStr = top.map(r => `r.${r.rx}.${r.rz}=${r.chunks}`).join(', ');
+      console.log(`    Densest: ${topStr}`);
+
+      if (regions.length > 5) {
+        const bottom = regions.slice(-Math.min(5, regions.length));
+        const bottomStr = bottom.map(r => `r.${r.rx}.${r.rz}=${r.chunks}`).join(', ');
+        console.log(`    Sparsest: ${bottomStr}`);
       }
+    }
+
+    // Use only substantial regions for bounds
+    for (const r of substantial) {
+      const rMinX = r.rx * 512;
+      const rMaxX = rMinX + 512;
+      const rMinZ = r.rz * 512;
+      const rMaxZ = rMinZ + 512;
+      if (rMinX < regionMinX) regionMinX = rMinX;
+      if (rMaxX > regionMaxX) regionMaxX = rMaxX;
+      if (rMinZ < regionMinZ) regionMinZ = rMinZ;
+      if (rMaxZ > regionMaxZ) regionMaxZ = rMaxZ;
     }
   }
 
   if (isFinite(regionMinX)) {
-    console.log(`  Region file coverage: X[${regionMinX}..${regionMaxX}] Z[${regionMinZ}..${regionMaxZ}] (${regionMaxX - regionMinX}x${regionMaxZ - regionMinZ})`);
+    console.log(`  Filtered region coverage: X[${regionMinX}..${regionMaxX}] Z[${regionMinZ}..${regionMaxZ}] (${regionMaxX - regionMinX}x${regionMaxZ - regionMinZ})`);
     minX = regionMinX; maxX = regionMaxX;
     minZ = regionMinZ; maxZ = regionMaxZ;
   }
 
-  // Include player positions
+  // Include player positions (only those within reasonable range of region bounds)
   const allPlayers = playerStore.getAll().players;
 
   // Log player position distribution per dimension
@@ -235,11 +267,32 @@ function computeDynamicBounds(worldPath: string, worldInfo: import('../shared/pr
     console.log(`  Player positions [${dim}]: ${stats.count} players, X[${Math.floor(stats.minX)}..${Math.ceil(stats.maxX)}] Z[${Math.floor(stats.minZ)}..${Math.ceil(stats.maxZ)}]`);
   }
 
+  // Only expand bounds for players within 2x the region coverage range
+  // This prevents distant legacy player positions from inflating bounds
+  const regionSpanX = isFinite(regionMinX) ? regionMaxX - regionMinX : 0;
+  const regionSpanZ = isFinite(regionMinZ) ? regionMaxZ - regionMinZ : 0;
+  const playerRangeX = Math.max(regionSpanX * 2, 2000);
+  const playerRangeZ = Math.max(regionSpanZ * 2, 2000);
+  const regionCenterX = isFinite(regionMinX) ? (regionMinX + regionMaxX) / 2 : 0;
+  const regionCenterZ = isFinite(regionMinZ) ? (regionMinZ + regionMaxZ) / 2 : 0;
+
+  let includedPlayers = 0;
+  let excludedPlayers = 0;
   for (const p of allPlayers) {
+    // Skip players too far from the region center
+    if (isFinite(regionMinX) &&
+        (Math.abs(p.x - regionCenterX) > playerRangeX || Math.abs(p.z - regionCenterZ) > playerRangeZ)) {
+      excludedPlayers++;
+      continue;
+    }
+    includedPlayers++;
     if (p.x < minX) minX = Math.floor(p.x);
     if (p.x > maxX) maxX = Math.ceil(p.x);
     if (p.z < minZ) minZ = Math.floor(p.z);
     if (p.z > maxZ) maxZ = Math.ceil(p.z);
+  }
+  if (excludedPlayers > 0) {
+    console.log(`  Player bounds filter: ${includedPlayers} included, ${excludedPlayers} too far from region center — excluded`);
   }
 
   // Fallback if no data at all
@@ -261,7 +314,7 @@ function computeDynamicBounds(worldPath: string, worldInfo: import('../shared/pr
   minZ = Math.floor(minZ / 16) * 16;
   maxZ = Math.ceil(maxZ / 16) * 16;
 
-  // Final size cap — if bounds exceed MAX_MAP_SIZE, shrink to fit centered on the region area
+  // Final size cap — if bounds still exceed MAX_MAP_SIZE, shrink centered on filtered region area
   const computedWidth = maxX - minX;
   const computedHeight = maxZ - minZ;
   if (computedWidth > MAX_MAP_SIZE || computedHeight > MAX_MAP_SIZE) {
@@ -272,11 +325,10 @@ function computeDynamicBounds(worldPath: string, worldInfo: import('../shared/pr
       ? (regionMinZ + regionMaxZ) / 2
       : (minZ + maxZ) / 2;
 
-    // Keep whichever dimension is under the cap, shrink the other(s)
     const capW = Math.min(computedWidth, MAX_MAP_SIZE);
     const capH = Math.min(computedHeight, MAX_MAP_SIZE);
 
-    console.log(`  Bounds too large (${computedWidth}x${computedHeight}), capping to ${capW}x${capH} centered on region area`);
+    console.log(`  Bounds too large (${computedWidth}x${computedHeight}), capping to ${capW}x${capH} centered on filtered region area`);
 
     minX = Math.floor((centerX - capW / 2) / 16) * 16;
     maxX = minX + Math.ceil(capW / 16) * 16;
@@ -284,7 +336,7 @@ function computeDynamicBounds(worldPath: string, worldInfo: import('../shared/pr
     maxZ = minZ + Math.ceil(capH / 16) * 16;
   }
 
-  console.log(`Dynamic bounds: X[${minX}..${maxX}] Z[${minZ}..${maxZ}] (${maxX - minX}x${maxZ - minZ} pixels)\n`);
+  console.log(`Dynamic bounds: X[${minX}..${maxX}] Z[${minZ}..${maxZ}] (${maxX - minX}x${maxZ - minZ} blocks)\n`);
 
   // Update config and worldInfo
   config.bounds = { minX, maxX, minZ, maxZ };
