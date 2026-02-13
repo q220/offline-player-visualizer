@@ -309,7 +309,10 @@ export function setContourLines(data: ContourData): void {
   contourLayer.addTo(map);
 }
 
-export function setCustomBounds(bounds: { minX: number; maxX: number; minZ: number; maxZ: number } | null): void {
+export function setCustomBounds(
+  bounds: { minX: number; maxX: number; minZ: number; maxZ: number } | null,
+  fit = true,
+): void {
   if (!map || !storedWorldInfo) return;
 
   if (bounds) {
@@ -319,10 +322,12 @@ export function setCustomBounds(bounds: { minX: number; maxX: number; minZ: numb
       L.latLng(bounds.minZ - padLat, bounds.minX - padLng),
       L.latLng(bounds.maxZ + padLat, bounds.maxX + padLng),
     ));
-    map.fitBounds(L.latLngBounds(
-      L.latLng(bounds.minZ, bounds.minX),
-      L.latLng(bounds.maxZ, bounds.maxX),
-    ));
+    if (fit) {
+      map.fitBounds(L.latLngBounds(
+        L.latLng(bounds.minZ, bounds.minX),
+        L.latLng(bounds.maxZ, bounds.maxX),
+      ));
+    }
   } else {
     // Restore original region-based maxBounds
     const { minX, maxX, minZ, maxZ } = storedWorldInfo.bounds;
@@ -332,7 +337,9 @@ export function setCustomBounds(bounds: { minX: number; maxX: number; minZ: numb
       L.latLng(minZ - padLat, minX - padLng),
       L.latLng(maxZ + padLat, maxX + padLng),
     ));
-    map.fitBounds(regionBounds);
+    if (fit) {
+      map.fitBounds(regionBounds);
+    }
   }
 }
 

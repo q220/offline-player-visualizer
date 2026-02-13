@@ -536,42 +536,38 @@ body {
   background: transparent;
 }
 
-/* Area select control */
-.area-select-control {
+/* Area select sidebar section */
+.area-section {
+  background: rgba(233, 69, 96, 0.06);
+  border-left: 3px solid var(--accent);
+}
+
+.section-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-bottom: 10px;
+}
+
+.area-buttons {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  gap: 8px;
 }
 
-.area-select-btn {
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s;
+.area-draw-btn {
+  flex: 1;
+  font-size: 13px;
+  padding: 8px 16px;
 }
 
-.area-select-btn:hover {
-  border-color: var(--accent);
-  background: var(--bg-tertiary);
+.area-draw-btn.drawing {
+  background: var(--accent-hover);
+  animation: pulse 1.5s ease-in-out infinite;
 }
 
-.area-select-btn.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-.area-select-btn.hidden {
-  display: none;
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 
 /* Draw mode cursor */

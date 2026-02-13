@@ -13,7 +13,7 @@ import {
   getMap,
 } from './map';
 import { setPlayerDimension, setPlayerDateFilter, getPlayerDateFilter, setPlayerExtendedBounds, setAreaBoundsOverride } from './player-layer';
-import { initAreaSelect, onAreaBoundsChange, clearArea, getAreaBounds } from './area-select';
+import { initAreaSelect, onAreaBoundsChange, onDrawModeChange, enterDrawMode, clearArea, getAreaBounds } from './area-select';
 import { dimensionSlug } from '../shared/constants';
 import { setStatus, clearStatus } from './status';
 
@@ -201,9 +201,28 @@ export function initFilters(info: WorldInfo): void {
 
   // Area select tool
   initAreaSelect(map, info);
-  onAreaBoundsChange((bounds) => {
-    // Update map maxBounds and fit
-    setCustomBounds(bounds);
+
+  const areaDrawBtn = document.getElementById('area-draw-btn') as HTMLButtonElement;
+  const areaClearBtn = document.getElementById('area-clear-btn') as HTMLButtonElement;
+  const areaInfoEl = document.getElementById('area-info') as HTMLDivElement;
+
+  areaDrawBtn.addEventListener('click', () => {
+    enterDrawMode();
+  });
+
+  areaClearBtn.addEventListener('click', () => {
+    clearArea();
+  });
+
+  onDrawModeChange((active) => {
+    areaDrawBtn.textContent = active ? 'Click & drag on map...' : 'Draw Rectangle';
+    areaDrawBtn.classList.toggle('drawing', active);
+  });
+
+  onAreaBoundsChange((bounds, opts) => {
+    // Update map maxBounds; only fitBounds on initial draw, not corner adjustments
+    const fit = opts?.fit !== false;
+    setCustomBounds(bounds, fit);
     // Clamp player dots to area
     setAreaBoundsOverride(bounds);
     // Disable OOB toggle while area is active
@@ -216,10 +235,16 @@ export function initFilters(info: WorldInfo): void {
         toggleOobEl.parentElement!.style.opacity = '1';
       }
     }
-    // Re-render heatmap for the area
+    // Update sidebar UI
     if (bounds) {
+      areaClearBtn.style.display = '';
+      const w = bounds.maxX - bounds.minX;
+      const h = bounds.maxZ - bounds.minZ;
+      areaInfoEl.textContent = `${w} x ${h} blocks (${bounds.minX}, ${bounds.minZ}) to (${bounds.maxX}, ${bounds.maxZ})`;
       renderAreaHeatmap(bounds);
     } else {
+      areaClearBtn.style.display = 'none';
+      areaInfoEl.textContent = '';
       // Restore default heatmap
       const slug = dimensionSlug(currentDimension);
       setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);

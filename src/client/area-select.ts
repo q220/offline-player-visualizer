@@ -3,59 +3,28 @@ import type { WorldInfo } from '../shared/protocol';
 declare const L: typeof import('leaflet');
 
 type BoundsRect = { minX: number; maxX: number; minZ: number; maxZ: number };
-type BoundsCallback = (bounds: BoundsRect | null) => void;
+type BoundsCallback = (bounds: BoundsRect | null, opts?: { fit?: boolean }) => void;
+type DrawModeCallback = (active: boolean) => void;
 
 let map: L.Map;
 let areaRect: L.Rectangle | null = null;
 let cornerMarkers: L.Marker[] = [];
 let drawMode = false;
 let drawStart: L.LatLng | null = null;
-let callbacks: BoundsCallback[] = [];
-let controlEl: HTMLDivElement;
-let drawBtn: HTMLButtonElement;
-let resetBtn: HTMLButtonElement;
+let boundsCallbacks: BoundsCallback[] = [];
+let drawModeCallbacks: DrawModeCallback[] = [];
+let cornerDebounce: ReturnType<typeof setTimeout> | null = null;
 
 export function initAreaSelect(leafletMap: L.Map, _worldInfo: WorldInfo): void {
   map = leafletMap;
-
-  // Add control to map
-  const AreaControl = L.Control.extend({
-    onAdd() {
-      controlEl = L.DomUtil.create('div', 'area-select-control');
-
-      drawBtn = L.DomUtil.create('button', 'area-select-btn', controlEl) as HTMLButtonElement;
-      drawBtn.innerHTML = '&#9634;'; // □ square icon
-      drawBtn.title = 'Select area';
-      drawBtn.type = 'button';
-
-      resetBtn = L.DomUtil.create('button', 'area-select-btn area-select-reset hidden', controlEl) as HTMLButtonElement;
-      resetBtn.innerHTML = '&#10005;'; // ✕ close icon
-      resetBtn.title = 'Clear selection';
-      resetBtn.type = 'button';
-
-      drawBtn.addEventListener('click', () => {
-        if (drawMode) {
-          exitDrawMode();
-        } else {
-          enterDrawMode();
-        }
-      });
-
-      resetBtn.addEventListener('click', () => {
-        clearArea();
-      });
-
-      L.DomEvent.disableClickPropagation(controlEl);
-      L.DomEvent.disableScrollPropagation(controlEl);
-      return controlEl;
-    },
-  });
-
-  new AreaControl({ position: 'topleft' }).addTo(map);
 }
 
 export function onAreaBoundsChange(cb: BoundsCallback): void {
-  callbacks.push(cb);
+  boundsCallbacks.push(cb);
+}
+
+export function onDrawModeChange(cb: DrawModeCallback): void {
+  drawModeCallbacks.push(cb);
 }
 
 export function getAreaBounds(): BoundsRect | null {
@@ -70,34 +39,39 @@ export function getAreaBounds(): BoundsRect | null {
 }
 
 export function clearArea(): void {
+  if (drawMode) exitDrawMode();
   removeRect();
-  resetBtn.classList.add('hidden');
-  fireBoundsChange(null);
+  fireBoundsChange(null, { fit: true });
 }
 
-function enterDrawMode(): void {
+export function enterDrawMode(): void {
+  // Remove existing selection first
+  removeRect();
+  fireBoundsChange(null, { fit: true });
+
   drawMode = true;
-  drawBtn.classList.add('active');
   map.dragging.disable();
   map.getContainer().classList.add('draw-mode');
-
   map.on('mousedown', onDrawStart);
+  fireDrawModeChange(true);
 }
 
-function exitDrawMode(): void {
+export function exitDrawMode(): void {
   drawMode = false;
-  drawBtn.classList.remove('active');
   map.dragging.enable();
   map.getContainer().classList.remove('draw-mode');
-
   map.off('mousedown', onDrawStart);
   map.off('mousemove', onDrawMove);
   map.off('mouseup', onDrawEnd);
   drawStart = null;
+  fireDrawModeChange(false);
+}
+
+export function isInDrawMode(): boolean {
+  return drawMode;
 }
 
 function onDrawStart(e: L.LeafletMouseEvent): void {
-  // Remove any existing selection first
   removeRect();
   drawStart = e.latlng;
 
@@ -122,7 +96,6 @@ function onDrawMove(e: L.LeafletMouseEvent): void {
 function onDrawEnd(e: L.LeafletMouseEvent): void {
   if (!drawStart || !areaRect) return;
 
-  // Finalize bounds
   const finalBounds = L.latLngBounds(drawStart, e.latlng);
 
   // Reject tiny selections (accidental clicks)
@@ -136,8 +109,7 @@ function onDrawEnd(e: L.LeafletMouseEvent): void {
   areaRect.setBounds(finalBounds);
   exitDrawMode();
   addCornerHandles();
-  resetBtn.classList.remove('hidden');
-  fireBoundsChange(getAreaBounds());
+  fireBoundsChange(getAreaBounds(), { fit: true });
 }
 
 function addCornerHandles(): void {
@@ -165,14 +137,19 @@ function addCornerHandles(): void {
       zIndexOffset: 1000,
     });
 
-    // Set per-handle cursor via inline style
     marker.on('add', () => {
       const el = marker.getElement();
       if (el) el.style.cursor = cursors[i];
     });
 
     marker.on('drag', () => onCornerDrag(i));
-    marker.on('dragend', () => fireBoundsChange(getAreaBounds()));
+    marker.on('dragend', () => {
+      // Debounce corner adjustment re-renders
+      if (cornerDebounce) clearTimeout(cornerDebounce);
+      cornerDebounce = setTimeout(() => {
+        fireBoundsChange(getAreaBounds(), { fit: false });
+      }, 300);
+    });
 
     marker.addTo(map);
     cornerMarkers.push(marker);
@@ -182,16 +159,13 @@ function addCornerHandles(): void {
 function onCornerDrag(draggedIdx: number): void {
   if (!areaRect || cornerMarkers.length !== 4) return;
 
-  // Opposite corner stays fixed
   const oppositeIdx = (draggedIdx + 2) % 4;
   const dragged = cornerMarkers[draggedIdx].getLatLng();
   const opposite = cornerMarkers[oppositeIdx].getLatLng();
 
-  // Compute new bounds from dragged + opposite
   const newBounds = L.latLngBounds(dragged, opposite);
   areaRect.setBounds(newBounds);
 
-  // Update the other two corners to match
   const nw = newBounds.getNorthWest();
   const ne = newBounds.getNorthEast();
   const se = newBounds.getSouthEast();
@@ -218,10 +192,20 @@ function removeRect(): void {
     map.removeLayer(areaRect);
     areaRect = null;
   }
+  if (cornerDebounce) {
+    clearTimeout(cornerDebounce);
+    cornerDebounce = null;
+  }
 }
 
-function fireBoundsChange(bounds: BoundsRect | null): void {
-  for (const cb of callbacks) {
-    cb(bounds);
+function fireBoundsChange(bounds: BoundsRect | null, opts?: { fit?: boolean }): void {
+  for (const cb of boundsCallbacks) {
+    cb(bounds, opts);
+  }
+}
+
+function fireDrawModeChange(active: boolean): void {
+  for (const cb of drawModeCallbacks) {
+    cb(active);
   }
 }

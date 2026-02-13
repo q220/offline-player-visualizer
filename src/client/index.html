@@ -48,6 +48,27 @@
           <div id="dimension-toggles" class="toggle-group"></div>
         </div>
 
+        <div class="sidebar-section area-section">
+          <h2>Area Select</h2>
+          <p class="section-hint">
+            Draw a rectangle on the map to focus the heatmap and players to a
+            specific area. Drag corners to resize.
+          </p>
+          <div class="area-buttons">
+            <button id="area-draw-btn" class="btn area-draw-btn">
+              Draw Rectangle
+            </button>
+            <button
+              id="area-clear-btn"
+              class="btn btn-secondary"
+              style="display: none"
+            >
+              Clear
+            </button>
+          </div>
+          <div id="area-info" class="filter-info"></div>
+        </div>
+
         <div class="sidebar-section">
           <h2>Layers</h2>
           <label class="checkbox-label">
