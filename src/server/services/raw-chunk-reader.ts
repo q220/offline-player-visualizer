@@ -1,7 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
-import { parse as parseNBT } from 'prismarine-nbt';
+import nbt from 'prismarine-nbt';
+const parseNBT = nbt.parse;
+const simplifyNBT = nbt.simplify;
 import { LRUCache } from 'lru-cache';
 import { getRegionDir } from './world-scanner.js';
 import { getBlockColor } from '../data/block-colors.js';
@@ -62,40 +64,6 @@ function decompressChunkData(regionBuf: Buffer, localX: number, localZ: number):
   return null;
 }
 
-/** Simplify an NBT tag value recursively */
-function simplifyNBT(tag: any): any {
-  if (tag === null || tag === undefined) return tag;
-  if (typeof tag !== 'object') return tag;
-
-  if ('type' in tag && 'value' in tag) {
-    const val = tag.value;
-    if (typeof val !== 'object' || val === null) return val;
-
-    // Compound tag
-    if (!Array.isArray(val) && typeof val === 'object' && !Buffer.isBuffer(val)) {
-      const result: any = {};
-      for (const [k, v] of Object.entries(val)) {
-        result[k] = simplifyNBT(v);
-      }
-      return result;
-    }
-
-    // List tag
-    if (Array.isArray(val)) {
-      return val.map((item: any) => simplifyNBT(item));
-    }
-
-    return val;
-  }
-
-  // Already simplified or raw array
-  if (Array.isArray(tag)) {
-    return tag.map((item: any) => simplifyNBT(item));
-  }
-
-  return tag;
-}
-
 /** Extract palette index from packed long array (MC 1.16+ format) */
 function extractPaletteIndex(
   data: bigint[],
@@ -153,7 +121,8 @@ async function parseSectionsFromNBT(nbtData: Buffer): Promise<{ sections: Sectio
   let minY = -64;
 
   // Modern format (1.18+): sections are at root level
-  const rawSections = root.sections || root.Sections || [];
+  const rawSectionsVal = root.sections || root.Sections;
+  const rawSections = Array.isArray(rawSectionsVal) ? rawSectionsVal : [];
   if (root.yPos !== undefined) {
     minY = root.yPos * 16;
   }
