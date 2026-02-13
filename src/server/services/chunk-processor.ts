@@ -22,7 +22,7 @@ export function extractTopBlocks(chunk: any): Uint8Array {
     console.log('  [debug] Chunk keys:', Object.keys(chunk).slice(0, 15));
     console.log('  [debug] Has getBlock:', typeof chunk.getBlock);
     console.log('  [debug] Has sections:', typeof chunk.sections, Array.isArray(chunk.sections));
-    console.log('  [debug] minY:', chunk.minY, 'maxY:', chunk.maxY);
+    console.log('  [debug] minY:', chunk.minY, 'maxY:', chunk.maxY, 'worldHeight:', chunk.worldHeight);
 
     // Try reading a few blocks at different heights
     for (const testY of [319, 256, 128, 64, 32, 0, -1, -32, -64]) {
@@ -62,8 +62,8 @@ export function extractTopBlocks(chunk: any): Uint8Array {
     for (let z = 0; z < 16; z++) {
       let color: [number, number, number, number] = [0, 0, 0, 0];
 
-      const maxY = chunk.maxY ?? 320;
       const minY = chunk.minY ?? -64;
+      const maxY = chunk.maxY ?? (chunk.worldHeight ? minY + chunk.worldHeight : 320);
 
       for (let y = maxY - 1; y >= minY; y--) {
         try {

@@ -10,10 +10,19 @@ export async function initAnvil(mcVersion: string): Promise<void> {
   // prismarine-provider-anvil exports { Anvil: (version) => class Anvil }
   const mod = await import('prismarine-provider-anvil');
   const factory = (mod as any).default?.Anvil || (mod as any).Anvil;
-  // Use latest supported version as fallback if unknown
-  const version = mcVersion === 'unknown'
-    ? (mod as any).default?.latestSupportedVersion || (mod as any).latestSupportedVersion || '1.20.4'
-    : mcVersion;
+  // Use latest supported version as fallback for unknown or unsupported versions
+  const latestSupported = (mod as any).default?.latestSupportedVersion || (mod as any).latestSupportedVersion || '1.21.1';
+  let version = mcVersion;
+  if (version === 'unknown') {
+    version = latestSupported;
+  } else {
+    // Check if the version is supported; if not, fall back to latest supported
+    const tested = (mod as any).default?.testedVersions || (mod as any).testedVersions || [];
+    if (!tested.includes(version)) {
+      console.log(`  MC version ${version} not supported by prismarine, falling back to ${latestSupported}`);
+      version = latestSupported;
+    }
+  }
   AnvilClass = factory(version);
 }
 
