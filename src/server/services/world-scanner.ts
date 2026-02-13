@@ -94,15 +94,22 @@ export function getRegionDir(worldPath: string, dimension: string): string {
     case 'minecraft:the_end':
       return path.join(absPath, 'DIM1', 'region');
     default: {
-      // Custom dimensions: check world/dimensions/namespace/name/region/
       const dimName = dimension.replace('minecraft:', '');
+      const parentDir = path.dirname(absPath);
+
+      // 1. Vanilla custom dimensions: world/dimensions/namespace/name/region/
       const customPath = path.join(absPath, 'dimensions', 'minecraft', dimName, 'region');
       if (fs.existsSync(customPath)) return customPath;
-      // Fallback: check for Bukkit-style world_dimname/region/ in parent
-      const parentDir = path.dirname(absPath);
+
+      // 2. Spigot/Paper sibling world directory: ../dimname/region/
+      const siblingPath = path.join(parentDir, dimName, 'region');
+      if (fs.existsSync(siblingPath)) return siblingPath;
+
+      // 3. Bukkit-style: ../worldname_dimname/region/
       const worldName = path.basename(absPath);
       const bukkitPath = path.join(parentDir, `${worldName}_${dimName}`, 'region');
       if (fs.existsSync(bukkitPath)) return bukkitPath;
+
       // Last resort: return the custom path even if it doesn't exist
       return customPath;
     }
