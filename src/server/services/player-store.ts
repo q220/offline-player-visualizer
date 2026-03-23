@@ -1,4 +1,5 @@
-import type { PlayerRecord, ClusterItem, PlayerItem, ClustersResponse } from '../../shared/protocol.js';
+import type { PlayerRecord, ClusterItem, PlayerItem, ClustersResponse, HubMetrics } from '../../shared/protocol.js';
+import { SINGLE_SESSION_TOLERANCE_MS } from '../../shared/protocol.js';
 
 /** Grid cell size in blocks for spatial indexing */
 const SPATIAL_CELL_SIZE = 256;
@@ -13,6 +14,7 @@ export class PlayerStore {
   private nameIndex = new Map<string, PlayerRecord>();
   /** Spatial grid index: dimension → (cellKey → players in that cell) */
   private spatialGrid = new Map<string, Map<string, PlayerRecord[]>>();
+  private hubMetricsCache = new Map<number, HubMetrics>();
 
   addAll(players: PlayerRecord[]): void {
     for (const p of players) {
@@ -166,7 +168,8 @@ export class PlayerStore {
       const items: PlayerItem[] = [];
       for (let i = 0; i < limit; i++) {
         const p = visible[i];
-        items.push({ type: 'player', uuid: p.uuid, name: p.name, x: p.x, z: p.z, y: p.y });
+        items.push({ type: 'player', uuid: p.uuid, name: p.name, x: p.x, z: p.z, y: p.y,
+          firstJoined: p.firstJoined, lastOnline: p.lastOnline, hasHeadItem: p.hasHeadItem });
       }
       return { totalInView, items };
     }
@@ -200,7 +203,8 @@ export class PlayerStore {
     for (const cell of clusterGrid.values()) {
       if (cell.count === 1) {
         const p = cell.first;
-        items.push({ type: 'player', uuid: p.uuid, name: p.name, x: p.x, z: p.z, y: p.y });
+        items.push({ type: 'player', uuid: p.uuid, name: p.name, x: p.x, z: p.z, y: p.y,
+          firstJoined: p.firstJoined, lastOnline: p.lastOnline, hasHeadItem: p.hasHeadItem });
       } else {
         items.push({
           type: 'cluster',
@@ -215,11 +219,48 @@ export class PlayerStore {
     return { totalInView, items };
   }
 
+  getDropoutPlayers(dimension: string, cutoffDate: number): PlayerRecord[] {
+    const players = this.byDimension.get(dimension) || [];
+    return players.filter((p) => {
+      if (!p.firstJoined || p.firstJoined < cutoffDate) return false;
+      const isSingleSession =
+        !p.lastOnline ||
+        Math.abs(p.lastOnline - p.firstJoined) < SINGLE_SESSION_TOLERANCE_MS;
+      return isSingleSession;
+    });
+  }
+
+  getHubMetrics(since: number): HubMetrics {
+    const cached = this.hubMetricsCache.get(since);
+    if (cached) return cached;
+
+    let totalPlayers = 0;
+    let withHeadItem = 0;
+    let withoutHeadItem = 0;
+    let singleSession = 0;
+
+    for (const p of this.byUuid.values()) {
+      if (!p.firstJoined || p.firstJoined < since) continue;
+      totalPlayers++;
+      if (p.hasHeadItem) withHeadItem++;
+      else withoutHeadItem++;
+      const isSingle =
+        !p.lastOnline ||
+        Math.abs(p.lastOnline - p.firstJoined) < SINGLE_SESSION_TOLERANCE_MS;
+      if (isSingle) singleSession++;
+    }
+
+    const result: HubMetrics = { since, totalPlayers, withHeadItem, withoutHeadItem, singleSession };
+    this.hubMetricsCache.set(since, result);
+    return result;
+  }
+
   clear(): void {
     this.byUuid.clear();
     this.byDimension.clear();
     this.nameIndex.clear();
     this.spatialGrid.clear();
+    this.hubMetricsCache.clear();
   }
 }
 
