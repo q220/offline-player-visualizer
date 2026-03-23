@@ -142,11 +142,23 @@ function renderItems(data: ClustersResponse, zoom: number): void {
         weight: 1,
       });
 
+      const firstJoinedStr = item.firstJoined
+        ? new Date(item.firstJoined).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+        : 'Unknown';
+      const lastOnlineStr = item.lastOnline
+        ? new Date(item.lastOnline).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+        : 'Unknown';
+      const introStatus = item.hasHeadItem ? "Didn't interact" : 'Got past intro';
+
+      // innerHTML is safe here: all data comes from server (usercache.json), not user input
       dot.bindPopup(
         `<div class="player-popup">
           <div class="popup-name">${item.name || 'Unknown'}</div>
           <div class="popup-info">UUID: ${item.uuid}</div>
           <div class="popup-info">Pos: ${Math.round(item.x)}, ${Math.round(item.y)}, ${Math.round(item.z)}</div>
+          <div class="popup-info">First joined: ${firstJoinedStr}</div>
+          <div class="popup-info">Last online: ${lastOnlineStr}</div>
+          <div class="popup-info">Intro: ${introStatus}</div>
         </div>`,
       );
 
