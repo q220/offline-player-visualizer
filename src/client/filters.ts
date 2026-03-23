@@ -11,6 +11,9 @@ import {
   toggleExtendedBounds,
   setCustomBounds,
   getMap,
+  setDropoutHeatmap,
+  setDropoutLegend,
+  clearDropoutHeatmap,
 } from './map';
 import { setPlayerDimension, setPlayerDateFilter, getPlayerDateFilter, setPlayerExtendedBounds, setAreaBoundsOverride } from './player-layer';
 import { initAreaSelect, onAreaBoundsChange, onDrawModeChange, enterDrawMode, clearArea, getAreaBounds } from './area-select';
@@ -80,6 +83,34 @@ export function initFilters(info: WorldInfo): void {
     toggleOobEl.addEventListener('change', () => {
       toggleExtendedBounds(toggleOobEl.checked);
       setPlayerExtendedBounds(toggleOobEl.checked);
+    });
+  }
+
+  // Dropout heatmap toggle
+  const toggleDropoutEl = document.getElementById(
+    'toggle-dropout-heatmap',
+  ) as HTMLInputElement | null;
+  if (toggleDropoutEl) {
+    toggleDropoutEl.addEventListener('change', async () => {
+      if (toggleDropoutEl.checked) {
+        toggleDropoutEl.disabled = true;
+        try {
+          const res = await fetch(apiUrl('/api/heatmap/dropout'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dimension: currentDimension }),
+          });
+          const data: HeatmapRenderResponse = await res.json();
+          setDropoutHeatmap(apiUrl(data.url), worldInfo);
+          setDropoutLegend(data.maxPerChunk, data.totalPlayers);
+        } catch (e) {
+          console.error('Failed to load dropout heatmap:', e);
+        } finally {
+          toggleDropoutEl.disabled = false;
+        }
+      } else {
+        clearDropoutHeatmap();
+      }
     });
   }
 
@@ -283,6 +314,9 @@ function updateFilterInfo(
 function setDimension(dim: string): void {
   currentDimension = dim;
   clearArea(); // Clear area selection on dimension switch
+  clearDropoutHeatmap();
+  const dropoutToggle = document.getElementById('toggle-dropout-heatmap') as HTMLInputElement | null;
+  if (dropoutToggle) dropoutToggle.checked = false;
   setBlockMap(dim, worldInfo);
   setPlayerDimension(dim);
 
