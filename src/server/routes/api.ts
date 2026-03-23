@@ -3,7 +3,8 @@ import { playerStore } from '../services/player-store.js';
 import { renderHeatmap } from '../services/heatmap-renderer.js';
 import { renderTile } from '../services/map-renderer.js';
 import { config } from '../config.js';
-import type { WorldInfo, HeatmapRenderRequest } from '../../shared/protocol.js';
+import type { WorldInfo, HeatmapRenderRequest, DropoutHeatmapRequest } from '../../shared/protocol.js';
+import { DEFAULT_HUB_DATE } from '../../shared/protocol.js';
 
 export async function registerApiRoutes(
   app: FastifyInstance,
@@ -137,6 +138,41 @@ export async function registerApiRoutes(
     if (renderBounds) parts.push(`renderBounds=[${renderBounds.minX}..${renderBounds.maxX}, ${renderBounds.minZ}..${renderBounds.maxZ}]`);
     console.log(`\nHeatmap render request: ${parts.join(', ')}`);
     const result = await renderHeatmap(dimension, { afterDate, beforeDate, viewport, renderBounds, id });
+    return {
+      url: result.url,
+      contoursUrl: result.contoursUrl,
+      maxPerChunk: result.maxPerChunk,
+      totalPlayers: result.totalPlayers,
+    };
+  });
+
+  // Hub intro metrics
+  app.get<{
+    Querystring: { since?: string };
+  }>('/api/hub-metrics', async (req) => {
+    const since = req.query.since ? parseInt(req.query.since) : DEFAULT_HUB_DATE;
+    return playerStore.getHubMetrics(since);
+  });
+
+  // Dropout heatmap rendering
+  app.post<{
+    Body: DropoutHeatmapRequest;
+  }>('/api/heatmap/dropout', async (req) => {
+    const { dimension, cutoffDate, viewport, renderBounds } = req.body;
+    const cutoff = cutoffDate ?? DEFAULT_HUB_DATE;
+    const id = `dropout-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    console.log(`\nDropout heatmap request: ${dimension}, cutoff=${new Date(cutoff).toISOString().slice(0, 10)}`);
+
+    const dropoutPlayers = playerStore.getDropoutPlayers(dimension, cutoff);
+    const result = await renderHeatmap(dimension, {
+      id,
+      viewport,
+      renderBounds,
+      colorRamp: 'dropout',
+      players: dropoutPlayers,
+    });
+
     return {
       url: result.url,
       contoursUrl: result.contoursUrl,

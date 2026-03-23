@@ -587,6 +587,59 @@ body {
   box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
 }
 
+/* Hub intro metrics */
+.hub-metrics-section {
+  background: rgba(147, 51, 234, 0.06);
+  border-left: 3px solid #9333ea;
+}
+
+.hub-metrics-date {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.hub-metrics-date label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  flex: 1;
+}
+
+.hub-metrics-date input[type='date'] {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--text-primary);
+  font-size: 12px;
+  flex: 1;
+}
+
+#hub-metrics .info-item .label {
+  color: var(--text-secondary);
+}
+
+.metric-pct {
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+/* Dropout heatmap legend */
+.dropout-legend {
+  background: rgba(22, 33, 62, 0.92);
+  border: 1px solid #9333ea;
+  border-radius: 6px;
+  padding: 10px 14px;
+  color: var(--text-primary);
+  font-size: 12px;
+  min-width: 160px;
+  backdrop-filter: blur(4px);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   #sidebar {

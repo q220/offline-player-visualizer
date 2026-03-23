@@ -12,6 +12,8 @@ let legendControl: L.Control | null = null;
 let contourLayer: L.LayerGroup | null = null;
 let storedWorldInfo: WorldInfo;
 let regionBounds: L.LatLngBounds;
+let dropoutHeatmapLayer: L.ImageOverlay | null = null;
+let dropoutLegendControl: L.Control | null = null;
 
 export function initMap(worldInfo: WorldInfo): L.Map {
   storedWorldInfo = worldInfo;
@@ -168,6 +170,80 @@ export function setHeatmap(
     opacity: 0.7,
     zIndex: 2,
   }).addTo(map);
+}
+
+export function setDropoutHeatmap(
+  url: string,
+  worldInfo: WorldInfo,
+  customBounds?: { minX: number; maxX: number; minZ: number; maxZ: number },
+): void {
+  const { minX, maxX, minZ, maxZ } = customBounds || worldInfo.bounds;
+  const bounds: L.LatLngBoundsExpression = [
+    [minZ, minX],
+    [maxZ, maxX],
+  ];
+
+  if (dropoutHeatmapLayer) {
+    map.removeLayer(dropoutHeatmapLayer);
+  }
+
+  dropoutHeatmapLayer = L.imageOverlay(`${url}?t=${Date.now()}`, bounds, {
+    opacity: 0.7,
+    zIndex: 3,
+  }).addTo(map);
+}
+
+export function clearDropoutHeatmap(): void {
+  if (dropoutHeatmapLayer) {
+    map.removeLayer(dropoutHeatmapLayer);
+    dropoutHeatmapLayer = null;
+  }
+  if (dropoutLegendControl) {
+    map.removeControl(dropoutLegendControl);
+    dropoutLegendControl = null;
+  }
+}
+
+export function setDropoutLegend(maxPerChunk: number, totalPlayers: number): void {
+  if (dropoutLegendControl) {
+    map.removeControl(dropoutLegendControl);
+  }
+
+  if (maxPerChunk <= 0) return;
+
+  const LegendControl = L.Control.extend({
+    onAdd() {
+      const div = L.DomUtil.create('div', 'dropout-legend');
+
+      const stops = [
+        'rgba(60,20,120,0.40)',
+        'rgba(100,30,180,0.55)',
+        'rgba(180,0,220,0.60)',
+        'rgba(230,40,200,0.70)',
+        'rgba(255,100,140,0.80)',
+        'rgba(255,200,220,0.90)',
+      ];
+
+      const gradientBar = `linear-gradient(to right, ${stops.join(', ')})`;
+
+      // innerHTML is safe here: data comes from server, not user input
+      div.innerHTML = `
+        <div class="legend-title">Dropout Density</div>
+        <div class="legend-bar" style="background: ${gradientBar};"></div>
+        <div class="legend-labels">
+          <span>0</span>
+          <span>${maxPerChunk} / chunk</span>
+        </div>
+        <div class="legend-total">${totalPlayers.toLocaleString()} dropout players</div>
+      `;
+
+      L.DomEvent.disableClickPropagation(div);
+      return div;
+    },
+  });
+
+  dropoutLegendControl = new LegendControl({ position: 'bottomleft' });
+  dropoutLegendControl.addTo(map);
 }
 
 export function toggleBlockMapVisibility(visible: boolean): void {

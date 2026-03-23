@@ -12,7 +12,7 @@ import { renderHeatmap } from './services/heatmap-renderer.js';
 import { preRenderTiles } from './services/map-renderer.js';
 import { listRegionFiles, findConnectedRegions, scanRegions, type RegionInfo } from './services/region-loader.js';
 import { registerApiRoutes } from './routes/api.js';
-import { DEFAULT_PLAYER_DAYS } from '../shared/protocol.js';
+import { DEFAULT_PLAYER_DAYS, PLAYER_CACHE_VERSION } from '../shared/protocol.js';
 
 async function main() {
   const worldPath = config.worldPath;
@@ -39,10 +39,12 @@ async function main() {
     try {
       console.log('Loading player index cache...');
       const cacheData = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
-      if (Array.isArray(cacheData) && cacheData.length > 0) {
-        playerStore.addAll(cacheData);
-        console.log(`  Loaded ${playerStore.count} players from cache\n`);
+      if (cacheData?.version === PLAYER_CACHE_VERSION && Array.isArray(cacheData.players) && cacheData.players.length > 0) {
+        playerStore.addAll(cacheData.players);
+        console.log(`  Loaded ${playerStore.count} players from cache (v${PLAYER_CACHE_VERSION})\n`);
         cacheLoaded = true;
+      } else {
+        console.log('  Cache version mismatch or old format, will re-index\n');
       }
     } catch (e) {
       console.warn('  Cache invalid, will re-index\n');
@@ -63,8 +65,9 @@ async function main() {
     // Cache for next startup
     try {
       const allPlayers = playerStore.getAll().players;
-      fs.writeFileSync(cacheFile, JSON.stringify(allPlayers));
-      console.log(`  Saved player cache to ${cacheFile}\n`);
+      const cachePayload = { version: PLAYER_CACHE_VERSION, players: allPlayers };
+      fs.writeFileSync(cacheFile, JSON.stringify(cachePayload));
+      console.log(`  Saved player cache (v${PLAYER_CACHE_VERSION}) to ${cacheFile}\n`);
     } catch (e) {
       console.warn('  Failed to save cache:', e);
     }

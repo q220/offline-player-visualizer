@@ -1,3 +1,6 @@
+// NOTE: This worker file is vestigial — player-indexer.ts does inline parsing
+// via parseBatch() and does not use worker threads. This file is kept for
+// reference but is not loaded at runtime.
 import { parentPort, workerData } from 'worker_threads';
 import fs from 'fs';
 import path from 'path';
@@ -56,6 +59,7 @@ async function parsePlayerFiles(): Promise<PlayerRecord[]> {
         z,
         dimension,
         lastModified: stat.mtimeMs,
+        hasHeadItem: false,
       });
     } catch (e) {
       // Skip corrupt files

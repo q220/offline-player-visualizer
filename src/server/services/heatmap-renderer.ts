@@ -36,6 +36,8 @@ export async function renderHeatmap(
     id?: string;
     viewport?: { minX: number; maxX: number; minZ: number; maxZ: number };
     renderBounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
+    colorRamp?: 'default' | 'dropout';
+    players?: import('../../shared/protocol.js').PlayerRecord[];
   },
 ): Promise<HeatmapResult> {
   const { minX, maxX, minZ, maxZ } = opts?.renderBounds || config.bounds;
@@ -44,16 +46,21 @@ export async function renderHeatmap(
   const chunkW = Math.ceil((maxX - minX) / CHUNK_SIZE);
   const chunkH = Math.ceil((maxZ - minZ) / CHUNK_SIZE);
 
-  // Get players for this dimension
-  let players = playerStore.getPlayersByDimension(dimension);
+  // Get players for this dimension (use pre-filtered list if provided)
+  let players: import('../../shared/protocol.js').PlayerRecord[];
+  if (opts?.players) {
+    players = opts.players;
+  } else {
+    players = playerStore.getPlayersByDimension(dimension);
 
-  if (opts?.afterDate) {
-    const after = opts.afterDate;
-    players = players.filter((p) => p.lastModified >= after);
-  }
-  if (opts?.beforeDate) {
-    const before = opts.beforeDate;
-    players = players.filter((p) => p.lastModified <= before);
+    if (opts?.afterDate) {
+      const after = opts.afterDate;
+      players = players.filter((p) => p.lastModified >= after);
+    }
+    if (opts?.beforeDate) {
+      const before = opts.beforeDate;
+      players = players.filter((p) => p.lastModified <= before);
+    }
   }
 
   const t0 = performance.now();
@@ -172,7 +179,7 @@ export async function renderHeatmap(
     const dstRow = chunkH - 1 - cz; // flip: minZ data → bottom of image
     for (let cx = 0; cx < chunkW; cx++) {
       const val = blurred[cz * chunkW + cx] / maxBlurred;
-      const [r, g, b, a] = heatmapColor(val);
+      const [r, g, b, a] = (opts?.colorRamp === 'dropout' ? dropoutColor : heatmapColor)(val);
       const idx = (dstRow * chunkW + cx) * 4;
       pixels[idx] = r;
       pixels[idx + 1] = g;
@@ -552,6 +559,32 @@ function heatmapColor(val: number): [number, number, number, number] {
     // Orange → red
     const t = (val - 0.75) / 0.25;
     r = 255; g = Math.round(155 * (1 - t)); b = 0;
+  }
+
+  return [r, g, b, alpha];
+}
+
+function dropoutColor(val: number): [number, number, number, number] {
+  if (val < 0.001) return [0, 0, 0, 0];
+
+  const alpha = Math.round(Math.min(100 + val * 155, 230));
+  let r: number, g: number, b: number;
+
+  if (val < 0.2) {
+    const t = val / 0.2;
+    r = Math.round(60 + t * 40); g = Math.round(20 + t * 10); b = Math.round(120 + t * 60);
+  } else if (val < 0.4) {
+    const t = (val - 0.2) / 0.2;
+    r = Math.round(100 + t * 80); g = Math.round(30 * (1 - t)); b = Math.round(180 + t * 40);
+  } else if (val < 0.6) {
+    const t = (val - 0.4) / 0.2;
+    r = Math.round(180 + t * 50); g = Math.round(t * 40); b = Math.round(220 - t * 20);
+  } else if (val < 0.8) {
+    const t = (val - 0.6) / 0.2;
+    r = Math.round(230 + t * 25); g = Math.round(40 + t * 60); b = Math.round(200 - t * 60);
+  } else {
+    const t = (val - 0.8) / 0.2;
+    r = 255; g = Math.round(100 + t * 100); b = Math.round(140 + t * 80);
   }
 
   return [r, g, b, alpha];
