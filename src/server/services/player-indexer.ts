@@ -71,6 +71,19 @@ export async function indexPlayers(
   return allPlayers;
 }
 
+function nbtLongToNumber(val: unknown): number | undefined {
+  if (val == null) return undefined;
+  if (typeof val === 'number') return val;
+  if (typeof val === 'bigint') return Number(val);
+  if (Array.isArray(val) && val.length === 2) {
+    const low = val[0] >>> 0;
+    const high = val[1];
+    const big = (BigInt(high) << 32n) | BigInt(low);
+    return Number(big);
+  }
+  return undefined;
+}
+
 async function parseBatch(
   files: string[],
   parse: (buffer: Buffer) => Promise<{ parsed: any; type: string }>,
@@ -112,13 +125,22 @@ async function parseBatch(
       // UUID from filename
       const uuid = path.basename(filePath, '.dat');
 
+      const bukkit = root.bukkit?.value;
+      const firstJoined = nbtLongToNumber(bukkit?.firstPlayed?.value);
+      const lastOnline = nbtLongToNumber(bukkit?.lastPlayed?.value);
+
+      let hasHeadItem = false;
+      const inventory = root.Inventory?.value?.value;
+      if (Array.isArray(inventory)) {
+        hasHeadItem = inventory.some(
+          (item: any) => item.Slot?.value === 103,
+        );
+      }
+
       results.push({
-        uuid,
-        x,
-        y,
-        z,
-        dimension,
+        uuid, x, y, z, dimension,
         lastModified: stat.mtimeMs,
+        firstJoined, lastOnline, hasHeadItem,
       });
     } catch {
       // Skip corrupt files
