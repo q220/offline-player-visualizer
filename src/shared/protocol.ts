@@ -6,6 +6,9 @@ export interface PlayerRecord {
   y: number;
   dimension: string;
   lastModified: number;
+  firstJoined?: number;
+  lastOnline?: number;
+  hasHeadItem: boolean;
 }
 
 export interface WorldInfo {
@@ -92,6 +95,9 @@ export interface PlayerItem {
   x: number;
   z: number;
   y: number;
+  firstJoined?: number;
+  lastOnline?: number;
+  hasHeadItem: boolean;
 }
 
 export interface ClustersResponse {
@@ -102,3 +108,19 @@ export interface ClustersResponse {
 
 /** Default number of days to show players for */
 export const DEFAULT_PLAYER_DAYS = 30;
+
+export interface HubMetrics {
+  since: number;
+  totalPlayers: number;
+  withHeadItem: number;
+  withoutHeadItem: number;
+  singleSession: number;
+}
+
+export interface DropoutHeatmapRequest extends HeatmapRenderRequest {
+  cutoffDate?: number;
+}
+
+export const DEFAULT_HUB_DATE = new Date('2026-02-16').getTime();
+export const SINGLE_SESSION_TOLERANCE_MS = 3_600_000;
+export const PLAYER_CACHE_VERSION = 2;
