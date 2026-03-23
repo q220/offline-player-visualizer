@@ -43,6 +43,35 @@
           </div>
         </div>
 
+        <div class="sidebar-section hub-metrics-section">
+          <h2>Hub Intro Metrics</h2>
+          <div class="hub-metrics-date">
+            <label>
+              Since:
+              <input type="date" id="hub-metrics-since" value="2026-02-16" />
+            </label>
+            <button id="hub-metrics-refresh" class="btn btn-secondary">Update</button>
+          </div>
+          <div id="hub-metrics" class="info-box">
+            <div class="info-item">
+              <span class="label">Total players:</span>
+              <span id="hm-total">-</span>
+            </div>
+            <div class="info-item">
+              <span class="label">Didn't interact:</span>
+              <span id="hm-head-item">-</span>
+            </div>
+            <div class="info-item">
+              <span class="label">Got past intro:</span>
+              <span id="hm-no-head-item">-</span>
+            </div>
+            <div class="info-item">
+              <span class="label">Never returned:</span>
+              <span id="hm-single-session">-</span>
+            </div>
+          </div>
+        </div>
+
         <div class="sidebar-section">
           <h2>Dimension</h2>
           <div id="dimension-toggles" class="toggle-group"></div>
@@ -82,6 +111,10 @@
           <label class="checkbox-label">
             <input type="checkbox" id="toggle-oob-players" />
             Show Out-of-Bounds Players
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="toggle-dropout-heatmap" />
+            Show Dropout Heatmap
           </label>
         </div>
 
