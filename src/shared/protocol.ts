@@ -279,6 +279,8 @@ export interface FlowResponse {
 export interface FlowSignalsResponse {
   generatedAt: number;
   window: { from: number; to: number; baselineFrom: number };
+  /** Every data source loaded: a signal missing now really means the problem is gone */
+  complete: boolean;
   signals: FlowSignal[];
 }
 

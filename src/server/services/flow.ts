@@ -313,9 +313,11 @@ export class FlowModel {
   /** The current signals alone: what an alert watcher needs */
   signalsReport(): FlowSignalsResponse {
     const from = this.generatedAt - SIGNAL_WINDOW_MS;
+    const { intro, packs, clients, sessions, activity } = this.src;
     return {
       generatedAt: this.generatedAt,
       window: { from, to: this.generatedAt, baselineFrom: from - SIGNAL_BASELINE_MS },
+      complete: [intro, packs, clients, sessions, activity].every((source) => source !== null),
       signals: this.signals(),
     };
   }
