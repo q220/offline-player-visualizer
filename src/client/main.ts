@@ -1,7 +1,7 @@
-import type { WorldInfo } from '../shared/protocol';
-import { dimensionSlug } from '../shared/constants';
+import type { FlowPlayer, WorldInfo } from '../shared/protocol';
 import { apiUrl } from './api';
-import { initMap, setBlockMap, setHeatmap, setHeatmapLegend, loadContours } from './map';
+import { initMap, setBlockMap, showDefaultHeatmap, getMap, flyTo, addPlayerMarker, clearPlayerMarkers } from './map';
+import { initFlowPage, onFlowShown } from './flow/flow-page';
 import { initSearch } from './search';
 import { initFilters } from './filters';
 import { initSidebar } from './sidebar';
@@ -10,17 +10,63 @@ import { initStatus, setStatus, clearStatus } from './status';
 
 declare const L: typeof import('leaflet');
 
-async function init(): Promise<void> {
+const $ = (id: string) => document.getElementById(id)!;
+
+let worldInfo: WorldInfo | null = null;
+let mapReady = false;
+
+async function boot(): Promise<void> {
+  try {
+    const infoRes = await fetch(apiUrl('/api/world-info'));
+    worldInfo = await infoRes.json();
+  } catch (err) {
+    console.error('Failed to load world info:', err);
+  }
+  if (worldInfo) $('brand-world').textContent = `${worldInfo.name} · ${worldInfo.mcVersion}`;
+
+  initFlowPage({ onShowOnMap: showPlayerOnMap });
+  window.addEventListener('hashchange', route);
+  route();
+}
+
+/** #map shows the map, anything else the flow page */
+function route(): void {
+  const view = location.hash === '#map' ? 'map' : 'flow';
+  $('view-flow').hidden = view !== 'flow';
+  $('app').hidden = view !== 'map';
+  for (const tab of document.querySelectorAll<HTMLAnchorElement>('.tab')) {
+    if (tab.dataset.view === view) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  }
+  if (view === 'map') {
+    ensureMap();
+    getMap()?.invalidateSize();
+  } else {
+    onFlowShown();
+  }
+}
+
+/** Leaflet measures its container, so the map is built the first time its view is visible */
+function ensureMap(): void {
+  if (mapReady || !worldInfo) return;
+  mapReady = true;
+  initMapView(worldInfo);
+}
+
+function showPlayerOnMap(p: FlowPlayer): void {
+  if (location.hash !== '#map') location.hash = '#map';
+  route();
+  clearPlayerMarkers();
+  addPlayerMarker(p.x, p.z, p.name ?? '', p.uuid, p.dimension).openPopup();
+  flyTo(p.x, p.z, 3);
+}
+
+function initMapView(worldInfo: WorldInfo): void {
   const loadingOverlay = document.getElementById('loading-overlay')!;
 
   try {
-    // 1. Fetch world info
-    const infoRes = await fetch(apiUrl('/api/world-info'));
-    const worldInfo: WorldInfo = await infoRes.json();
-
-    // 2. Initialize map
+    // 1. Initialize map
     const map = initMap(worldInfo);
-
     // 3. Initialize status bar (must be before modules that produce status)
     initStatus();
 
@@ -33,19 +79,9 @@ async function init(): Promise<void> {
       : worldInfo.dimensions[0] || 'minecraft:overworld';
     setBlockMap(defaultDim, worldInfo);
 
-    // Load heatmap (pre-rendered on server with default 30-day filter)
+    // Load heatmap, legend and contour lines (pre-rendered on server with default 30-day filter)
     setStatus('heatmap-init', 'Loading heatmap...');
-    const slug = dimensionSlug(defaultDim);
-    setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
-
-    // 5b. Show heatmap legend and contour lines
-    if (worldInfo.heatmapDensity?.[defaultDim]) {
-      const density = worldInfo.heatmapDensity[defaultDim];
-      setHeatmapLegend(density.maxPerChunk, density.totalPlayers);
-      if (density.contoursUrl) {
-        loadContours(density.contoursUrl);
-      }
-    }
+    showDefaultHeatmap(defaultDim);
     clearStatus('heatmap-init');
 
     // 6. Initialize filters (dimension toggles, date, layers)
@@ -107,4 +143,4 @@ async function init(): Promise<void> {
   }
 }
 
-init();
+boot();

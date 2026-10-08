@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
 import { loadChunkColumnData } from './raw-chunk-reader.js';
+import { getRegionDir } from './world-scanner.js';
+import { config } from '../config.js';
 import { dimensionSlug } from '../../shared/constants.js';
 import type { RegionInfo } from './region-loader.js';
 
@@ -13,26 +15,32 @@ const SHADE_DARKEN = 0.83;
 const WATER_TINT_COLOR = [40, 50, 150];
 const WATER_MAX_DEPTH_FOR_TINT = 30;
 
-// Persistent cache directory (survives vite builds and git pulls)
-const TILE_CACHE_DIR = path.resolve('.tile-cache');
+// Per-world tile cache (survives vite builds and git pulls)
+const TILE_CACHE_DIR = path.join(config.cacheDir, 'tiles');
 
-/**
- * Get the path for a cached tile PNG.
- */
-export function getTileCachePath(dimension: string, tx: number, ty: number): string {
-  const slug = dimensionSlug(dimension);
-  return path.join(TILE_CACHE_DIR, slug, `${tx}.${ty}.png`);
+/** Tiles being rendered right now, so concurrent requests share one render */
+const inFlight = new Map<string, Promise<TileResult>>();
+
+interface TileResult {
+  png: Buffer | null;
+  rendered: boolean;
+}
+
+function getTileCachePath(dimension: string, tx: number, ty: number): string {
+  return path.join(TILE_CACHE_DIR, dimensionSlug(dimension), `${tx}.${ty}.png`);
+}
+
+function mtimeOrNull(file: string): number | null {
+  try {
+    return fs.statSync(file).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Check if a tile is already cached on disk.
- */
-export function isTileCached(dimension: string, tx: number, ty: number): boolean {
-  return fs.existsSync(getTileCachePath(dimension, tx, ty));
-}
-
-/**
- * Render a single tile on demand and cache it to disk.
+ * Render a single tile on demand and cache it to disk. A cached tile is
+ * re-rendered once its region file has been saved again.
  * Tile coordinates: tx = region rx, ty = -rz - 1 (Y-flipped for Leaflet).
  * Returns the PNG buffer, or null if the region has no content.
  */
@@ -42,60 +50,59 @@ export async function renderTile(
   tx: number,
   ty: number,
 ): Promise<Buffer | null> {
-  // Check cache first
+  return (await ensureTile(worldPath, dimension, tx, ty)).png;
+}
+
+function ensureTile(worldPath: string, dimension: string, tx: number, ty: number): Promise<TileResult> {
   const cachePath = getTileCachePath(dimension, tx, ty);
-  if (fs.existsSync(cachePath)) {
-    return fs.readFileSync(cachePath);
+  let pending = inFlight.get(cachePath);
+  if (!pending) {
+    pending = loadOrRenderTile(worldPath, dimension, tx, ty, cachePath)
+      .finally(() => inFlight.delete(cachePath));
+    inFlight.set(cachePath, pending);
   }
+  return pending;
+}
+
+async function loadOrRenderTile(
+  worldPath: string,
+  dimension: string,
+  tx: number,
+  ty: number,
+  cachePath: string,
+): Promise<TileResult> {
+  const regionDir = getRegionDir(worldPath, dimension);
+  if (!regionDir) return { png: null, rendered: false };
 
   // Convert tile coords to region coords
-  const rx = tx;
-  const rz = -ty - 1;
+  const regionPath = path.join(regionDir, `r.${tx}.${-ty - 1}.mca`);
+  const regionMtime = mtimeOrNull(regionPath);
+  if (regionMtime === null) return { png: null, rendered: false };
 
-  // Render the region
-  const pixels = await renderRegionPixels(worldPath, dimension, rx, rz);
-  if (!pixels) return null;
+  const tileMtime = mtimeOrNull(cachePath);
+  if (tileMtime !== null && tileMtime >= regionMtime) {
+    return { png: await fs.promises.readFile(cachePath), rendered: false };
+  }
 
-  // Save PNG to cache
-  const dir = path.dirname(cachePath);
-  fs.mkdirSync(dir, { recursive: true });
+  const pixels = await renderRegionPixels(await fs.promises.readFile(regionPath));
+  if (!pixels) return { png: null, rendered: true };
 
-  const pngBuffer = await sharp(pixels, { raw: { width: 512, height: 512, channels: 4 } })
+  const png = await sharp(pixels, { raw: { width: 512, height: 512, channels: 4 } })
     .png()
     .toBuffer();
 
-  fs.writeFileSync(cachePath, pngBuffer);
-  return pngBuffer;
-}
-
-/**
- * Clear the tile cache for a dimension (or all dimensions).
- */
-export function clearTileCache(dimension?: string): void {
-  if (dimension) {
-    const dir = path.join(TILE_CACHE_DIR, dimensionSlug(dimension));
-    if (fs.existsSync(dir)) {
-      fs.rmSync(dir, { recursive: true });
-      console.log(`Cleared tile cache for ${dimension}`);
-    }
-  } else {
-    if (fs.existsSync(TILE_CACHE_DIR)) {
-      fs.rmSync(TILE_CACHE_DIR, { recursive: true });
-      console.log('Cleared all tile cache');
-    }
-  }
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  const tmp = `${cachePath}.tmp`;
+  await fs.promises.writeFile(tmp, png);
+  await fs.promises.rename(tmp, cachePath);
+  return { png, rendered: true };
 }
 
 /**
  * Render a single region as a 512x512 RGBA buffer.
  * Y-flipped: row 0 = highest worldZ, row 511 = lowest worldZ.
  */
-async function renderRegionPixels(
-  worldPath: string,
-  dimension: string,
-  rx: number,
-  rz: number,
-): Promise<Buffer | null> {
+async function renderRegionPixels(regionBuf: Buffer): Promise<Buffer | null> {
   const pixels = Buffer.alloc(512 * 512 * 4);
   const heights = new Int16Array(512 * 512);
   const waterMap = new Uint8Array(512 * 512);
@@ -105,9 +112,8 @@ async function renderRegionPixels(
 
   for (let cx = 0; cx < 32; cx++) {
     for (let cz = 0; cz < 32; cz++) {
-      const chunkX = rx * 32 + cx;
-      const chunkZ = rz * 32 + cz;
-      const chunkData = await loadChunkColumnData(worldPath, dimension, chunkX, chunkZ);
+      const chunkData = await loadChunkColumnData(regionBuf, cx, cz);
+      if (!chunkData) continue;
 
       for (let bx = 0; bx < 16; bx++) {
         for (let bz = 0; bz < 16; bz++) {
@@ -188,8 +194,8 @@ async function renderRegionPixels(
 }
 
 /**
- * Pre-render all tiles for a dimension's regions at startup.
- * Skips tiles already cached on disk, so repeat startups are fast.
+ * Pre-render all tiles for a dimension's regions.
+ * Skips tiles that are still fresh on disk, so repeat startups are fast.
  */
 export async function preRenderTiles(
   worldPath: string,
@@ -204,15 +210,12 @@ export async function preRenderTiles(
     const tx = r.rx;
     const ty = -r.rz - 1;
 
-    if (isTileCached(dimension, tx, ty)) {
-      stats.cached++;
-    } else {
-      try {
-        await renderTile(worldPath, dimension, tx, ty);
-        stats.rendered++;
-      } catch {
-        stats.failed++;
-      }
+    try {
+      const { rendered } = await ensureTile(worldPath, dimension, tx, ty);
+      if (rendered) stats.rendered++;
+      else stats.cached++;
+    } catch {
+      stats.failed++;
     }
 
     onProgress(i + 1, regions.length);

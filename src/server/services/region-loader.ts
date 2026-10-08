@@ -1,60 +1,10 @@
 import fs from 'fs';
 import path from 'path';
-import { LRUCache } from 'lru-cache';
 import { getRegionDir } from './world-scanner.js';
-
-let AnvilClass: any;
-
-export async function initAnvil(mcVersion: string): Promise<void> {
-  if (AnvilClass) return;
-  // prismarine-provider-anvil exports { Anvil: (version) => class Anvil }
-  const mod = await import('prismarine-provider-anvil');
-  const factory = (mod as any).default?.Anvil || (mod as any).Anvil;
-  // Use latest supported version as fallback for unknown or unsupported versions
-  const latestSupported = (mod as any).default?.latestSupportedVersion || (mod as any).latestSupportedVersion || '1.21.1';
-  let version = mcVersion;
-  if (version === 'unknown') {
-    version = latestSupported;
-  } else {
-    // Check if the version is supported; if not, fall back to latest supported
-    const tested = (mod as any).default?.testedVersions || (mod as any).testedVersions || [];
-    if (!tested.includes(version)) {
-      console.log(`  MC version ${version} not supported by prismarine, falling back to ${latestSupported}`);
-      version = latestSupported;
-    }
-  }
-  AnvilClass = factory(version);
-}
-
-const chunkCache = new LRUCache<string, any>({ max: 500 });
-
-export async function loadChunk(
-  worldPath: string,
-  dimension: string,
-  chunkX: number,
-  chunkZ: number,
-): Promise<any | null> {
-  const key = `${dimension}:${chunkX}:${chunkZ}`;
-  const cached = chunkCache.get(key);
-  if (cached !== undefined) return cached;
-
-  const regionDir = getRegionDir(worldPath, dimension);
-  if (!fs.existsSync(regionDir)) return null;
-
-  try {
-    const anvil = new AnvilClass(regionDir);
-    const chunk = await anvil.load(chunkX, chunkZ);
-    chunkCache.set(key, chunk);
-    return chunk;
-  } catch {
-    chunkCache.set(key, null);
-    return null;
-  }
-}
 
 export function listRegionFiles(worldPath: string, dimension: string): string[] {
   const regionDir = getRegionDir(worldPath, dimension);
-  if (!fs.existsSync(regionDir)) return [];
+  if (!regionDir) return [];
 
   return fs
     .readdirSync(regionDir)

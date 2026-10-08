@@ -1,11 +1,12 @@
-import type { WorldInfo, HeatmapRenderResponse } from '../shared/protocol';
+import type { WorldInfo } from '../shared/protocol';
 import { DEFAULT_PLAYER_DAYS } from '../shared/protocol';
-import { apiUrl } from './api';
+import { apiUrl, requestHeatmap } from './api';
 import {
   setBlockMap,
   setHeatmap,
   setHeatmapLegend,
   loadContours,
+  showDefaultHeatmap,
   toggleHeatmapVisibility,
   toggleBlockMapVisibility,
   toggleExtendedBounds,
@@ -17,6 +18,7 @@ import {
 } from './map';
 import { setPlayerDimension, setPlayerDateFilter, getPlayerDateFilter, setPlayerExtendedBounds, setAreaBoundsOverride } from './player-layer';
 import { initAreaSelect, onAreaBoundsChange, onDrawModeChange, enterDrawMode, clearArea, getAreaBounds } from './area-select';
+import { DEFAULT_HUB_DATE } from '../shared/protocol';
 import { dimensionSlug } from '../shared/constants';
 import { setStatus, clearStatus } from './status';
 
@@ -94,17 +96,14 @@ export function initFilters(info: WorldInfo): void {
     toggleDropoutEl.addEventListener('change', async () => {
       if (toggleDropoutEl.checked) {
         toggleDropoutEl.disabled = true;
+        const sinceInput = document.getElementById('dropout-since') as HTMLInputElement | null;
+        const cutoffDate = sinceInput?.value ? new Date(sinceInput.value).getTime() : DEFAULT_HUB_DATE;
         try {
-          const res = await fetch(apiUrl('/api/heatmap/dropout'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dimension: currentDimension }),
-          });
-          const data: HeatmapRenderResponse = await res.json();
+          const data = await requestHeatmap('/api/heatmap/dropout', { dimension: currentDimension, cutoffDate });
           setDropoutHeatmap(apiUrl(data.url), worldInfo);
           setDropoutLegend(data.maxPerChunk, data.totalPlayers);
         } catch (e) {
-          console.error('Failed to load dropout heatmap:', e);
+          console.error('Failed to load the gave-up heatmap:', e);
         } finally {
           toggleDropoutEl.disabled = false;
         }
@@ -142,16 +141,11 @@ export function initFilters(info: WorldInfo): void {
     setPlayerDateFilter(afterDate, beforeDate);
 
     try {
-      const res = await fetch(apiUrl('/api/heatmap/render'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dimension: currentDimension,
-          afterDate,
-          beforeDate,
-        }),
+      const data = await requestHeatmap('/api/heatmap/render', {
+        dimension: currentDimension,
+        afterDate,
+        beforeDate,
       });
-      const data: HeatmapRenderResponse = await res.json();
       setHeatmap(apiUrl(data.url), worldInfo);
       setHeatmapLegend(data.maxPerChunk, data.totalPlayers);
       if (data.contoursUrl) {
@@ -173,15 +167,7 @@ export function initFilters(info: WorldInfo): void {
   clearBtn.addEventListener('click', () => {
     afterInput.value = '';
     beforeInput.value = '';
-    const slug = dimensionSlug(currentDimension);
-    setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
-    if (worldInfo.heatmapDensity?.[currentDimension]) {
-      const density = worldInfo.heatmapDensity[currentDimension];
-      setHeatmapLegend(density.maxPerChunk, density.totalPlayers);
-      if (density.contoursUrl) {
-        loadContours(density.contoursUrl);
-      }
-    }
+    showDefaultHeatmap(currentDimension);
     // Reset player dots to 30-day default
     const defaultAfter = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
     setPlayerDateFilter(defaultAfter, undefined);
@@ -201,14 +187,9 @@ export function initFilters(info: WorldInfo): void {
     setPlayerDateFilter(undefined, undefined);
 
     try {
-      const res = await fetch(apiUrl('/api/heatmap/render'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dimension: currentDimension,
-        }),
+      const data = await requestHeatmap('/api/heatmap/render', {
+        dimension: currentDimension,
       });
-      const data: HeatmapRenderResponse = await res.json();
       setHeatmap(apiUrl(data.url), worldInfo);
       setHeatmapLegend(data.maxPerChunk, data.totalPlayers);
       if (data.contoursUrl) {
@@ -277,15 +258,7 @@ export function initFilters(info: WorldInfo): void {
       areaClearBtn.style.display = 'none';
       areaInfoEl.textContent = '';
       // Restore default heatmap
-      const slug = dimensionSlug(currentDimension);
-      setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
-      if (worldInfo.heatmapDensity?.[currentDimension]) {
-        const density = worldInfo.heatmapDensity[currentDimension];
-        setHeatmapLegend(density.maxPerChunk, density.totalPlayers);
-        if (density.contoursUrl) {
-          loadContours(density.contoursUrl);
-        }
-      }
+      showDefaultHeatmap(currentDimension);
     }
   });
 }
@@ -322,15 +295,7 @@ function setDimension(dim: string): void {
 
   // Load pre-rendered heatmap (rendered with default 30-day filter)
   setStatus('heatmap-dimension', 'Loading heatmap...');
-  const slug = dimensionSlug(dim);
-  setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
-  if (worldInfo.heatmapDensity?.[dim]) {
-    const density = worldInfo.heatmapDensity[dim];
-    setHeatmapLegend(density.maxPerChunk, density.totalPlayers);
-    if (density.contoursUrl) {
-      loadContours(density.contoursUrl);
-    }
-  }
+  showDefaultHeatmap(dim);
   clearStatus('heatmap-dimension');
 }
 
@@ -346,19 +311,13 @@ async function renderAreaHeatmap(area: { minX: number; maxX: number; minZ: numbe
   const dateFilter = getPlayerDateFilter();
   setStatus('heatmap-area', 'Rendering heatmap for selected area...');
   try {
-    const res = await fetch(apiUrl('/api/heatmap/render'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        dimension: currentDimension,
-        renderBounds: area,
-        viewport: area,
-        afterDate: dateFilter.after,
-        beforeDate: dateFilter.before,
-      }),
-      signal: viewportAbortController.signal,
-    });
-    const data: HeatmapRenderResponse = await res.json();
+    const data = await requestHeatmap('/api/heatmap/render', {
+      dimension: currentDimension,
+      renderBounds: area,
+      viewport: area,
+      afterDate: dateFilter.after,
+      beforeDate: dateFilter.before,
+    }, viewportAbortController.signal);
     // Place overlay at the area bounds (not world bounds) since the PNG covers only the area
     setHeatmap(apiUrl(data.url), worldInfo, area);
     setHeatmapLegend(data.maxPerChunk, data.totalPlayers);
@@ -408,18 +367,12 @@ async function renderForViewport(): Promise<void> {
 
   setStatus('heatmap-viewport', 'Refining heatmap for viewport...');
   try {
-    const res = await fetch(apiUrl('/api/heatmap/render'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        dimension: currentDimension,
-        viewport,
-        afterDate: dateFilter.after,
-        beforeDate: dateFilter.before,
-      }),
-      signal: viewportAbortController.signal,
-    });
-    const data: HeatmapRenderResponse = await res.json();
+    const data = await requestHeatmap('/api/heatmap/render', {
+      dimension: currentDimension,
+      viewport,
+      afterDate: dateFilter.after,
+      beforeDate: dateFilter.before,
+    }, viewportAbortController.signal);
     setHeatmap(apiUrl(data.url), worldInfo);
     setHeatmapLegend(data.maxPerChunk, data.totalPlayers);
     if (data.contoursUrl) {

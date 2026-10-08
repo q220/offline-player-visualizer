@@ -1,17 +1,12 @@
-import fs from 'fs';
-import path from 'path';
 import zlib from 'zlib';
 import nbt from 'prismarine-nbt';
 const parseNBT = nbt.parse;
 const simplifyNBT = nbt.simplify;
-import { LRUCache } from 'lru-cache';
-import { getRegionDir } from './world-scanner.js';
 import { getBlockColor } from '../data/block-colors.js';
 
 /**
- * Raw .mca region file reader that bypasses prismarine-provider-anvil.
- * Reads chunk NBT directly and extracts top-block colors per column.
- * This handles MC versions that prismarine doesn't fully support (e.g. 1.21.4).
+ * Raw .mca region file reader. Reads chunk NBT directly and extracts
+ * top-block colors per column, independent of the Minecraft version.
  */
 
 export interface ChunkColumnData {
@@ -23,25 +18,6 @@ export interface ChunkColumnData {
   isWater: Uint8Array;
   /** 16x16 water depth (blocks of water above the solid block) */
   waterDepth: Uint8Array;
-}
-
-// Cache parsed chunk column data
-const chunkCache = new LRUCache<string, ChunkColumnData>({ max: 500 });
-
-// Cache region file buffers to avoid re-reading
-const regionCache = new LRUCache<string, Buffer>({ max: 50 });
-
-function getRegionBuffer(regionPath: string): Buffer | null {
-  let buf = regionCache.get(regionPath);
-  if (buf !== undefined) return buf;
-
-  try {
-    buf = fs.readFileSync(regionPath);
-    regionCache.set(regionPath, buf);
-    return buf;
-  } catch {
-    return null;
-  }
 }
 
 function decompressChunkData(regionBuf: Buffer, localX: number, localZ: number): Buffer | null {
@@ -67,8 +43,11 @@ function decompressChunkData(regionBuf: Buffer, localX: number, localZ: number):
     return zlib.inflateSync(compressedData);
   } else if (compressionType === 1) {
     return zlib.gunzipSync(compressedData);
+  } else if (compressionType === 3) {
+    return compressedData;
   }
 
+  // LZ4 (4) and external .mcc chunks (bit 128) are not supported
   return null;
 }
 
@@ -176,10 +155,6 @@ async function parseSectionsFromNBT(nbtData: Buffer): Promise<{ sections: Sectio
   return { sections, minY };
 }
 
-function regionCoord(chunkCoord: number): number {
-  return Math.floor(chunkCoord / 32);
-}
-
 function getBlockName(sec: SectionData, blockIndex: number): string {
   if (sec.bitsPerEntry === 0) {
     return sec.palette[0] || '';
@@ -189,17 +164,22 @@ function getBlockName(sec: SectionData, blockIndex: number): string {
 }
 
 /**
- * Load a chunk and extract top-block colors, heights, and water info.
+ * Decode one chunk of an already-read region file and extract top-block
+ * colors, heights, and water info. Returns null if the chunk is absent.
  */
 export async function loadChunkColumnData(
-  worldPath: string,
-  dimension: string,
-  chunkX: number,
-  chunkZ: number,
-): Promise<ChunkColumnData> {
-  const key = `raw:${dimension}:${chunkX}:${chunkZ}`;
-  const cached = chunkCache.get(key);
-  if (cached !== undefined) return cached;
+  regionBuf: Buffer,
+  localX: number,
+  localZ: number,
+): Promise<ChunkColumnData | null> {
+  let nbtData: Buffer | null;
+  try {
+    nbtData = decompressChunkData(regionBuf, localX, localZ);
+  } catch {
+    // Torn read while the server was saving this region
+    return null;
+  }
+  if (!nbtData) return null;
 
   const result: ChunkColumnData = {
     pixels: new Uint8Array(16 * 16 * 4),
@@ -207,26 +187,6 @@ export async function loadChunkColumnData(
     isWater: new Uint8Array(16 * 16),
     waterDepth: new Uint8Array(16 * 16),
   };
-
-  const regionDir = getRegionDir(worldPath, dimension);
-  const rx = regionCoord(chunkX);
-  const rz = regionCoord(chunkZ);
-
-  const regionPath = path.join(regionDir, `r.${rx}.${rz}.mca`);
-  const regionBuf = getRegionBuffer(regionPath);
-  if (!regionBuf) {
-    chunkCache.set(key, result);
-    return result;
-  }
-
-  const localX = ((chunkX % 32) + 32) % 32;
-  const localZ = ((chunkZ % 32) + 32) % 32;
-
-  const nbtData = decompressChunkData(regionBuf, localX, localZ);
-  if (!nbtData) {
-    chunkCache.set(key, result);
-    return result;
-  }
 
   try {
     const { sections } = await parseSectionsFromNBT(nbtData);
@@ -292,65 +252,8 @@ export async function loadChunkColumnData(
       }
     }
   } catch (e: any) {
-    console.error(`  Failed to parse chunk (${chunkX}, ${chunkZ}): ${e.message}`);
+    console.error(`  Failed to parse chunk (local ${localX}, ${localZ}): ${e.message}`);
   }
 
-  chunkCache.set(key, result);
   return result;
-}
-
-// Keep old API for compatibility
-export async function loadChunkTopBlocks(
-  worldPath: string,
-  dimension: string,
-  chunkX: number,
-  chunkZ: number,
-): Promise<Uint8Array> {
-  const data = await loadChunkColumnData(worldPath, dimension, chunkX, chunkZ);
-  return data.pixels;
-}
-
-export async function debugRawChunk(
-  worldPath: string,
-  dimension: string,
-  chunkX: number,
-  chunkZ: number,
-): Promise<void> {
-  const regionDir = getRegionDir(worldPath, dimension);
-  const rx = regionCoord(chunkX);
-  const rz = regionCoord(chunkZ);
-
-  const regionPath = path.join(regionDir, `r.${rx}.${rz}.mca`);
-  console.log(`  [raw-debug] Region file: ${regionPath}`);
-
-  const regionBuf = getRegionBuffer(regionPath);
-  if (!regionBuf) {
-    console.log(`  [raw-debug] Region file not found or empty`);
-    return;
-  }
-
-  const localX = ((chunkX % 32) + 32) % 32;
-  const localZ = ((chunkZ % 32) + 32) % 32;
-  console.log(`  [raw-debug] Chunk (${chunkX},${chunkZ}) -> region (${rx},${rz}), local (${localX},${localZ})`);
-
-  const nbtData = decompressChunkData(regionBuf, localX, localZ);
-  if (!nbtData) {
-    console.log(`  [raw-debug] Chunk not found in region (not generated?)`);
-    return;
-  }
-
-  console.log(`  [raw-debug] Decompressed NBT size: ${nbtData.length} bytes`);
-
-  try {
-    const data = await loadChunkColumnData(worldPath, dimension, chunkX, chunkZ);
-    let nonTransparent = 0;
-    let waterCols = 0;
-    for (let i = 0; i < 256; i++) {
-      if (data.pixels[i * 4 + 3] > 0) nonTransparent++;
-      if (data.isWater[i]) waterCols++;
-    }
-    console.log(`  [raw-debug]   Top-block result: ${nonTransparent}/256 non-transparent, ${waterCols} water columns`);
-  } catch (e: any) {
-    console.log(`  [raw-debug] Parse error: ${e.message}`);
-  }
 }

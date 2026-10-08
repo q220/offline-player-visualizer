@@ -1,18 +1,18 @@
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
-import fastifyCors from '@fastify/cors';
 import fastifyCompress from '@fastify/compress';
 import path from 'path';
 import fs from 'fs';
 import { config } from './config.js';
 import { scanWorld } from './services/world-scanner.js';
-import { indexPlayers } from './services/player-indexer.js';
 import { playerStore } from './services/player-store.js';
+import { refreshData } from './services/live-data.js';
 import { renderHeatmap } from './services/heatmap-renderer.js';
 import { preRenderTiles } from './services/map-renderer.js';
-import { listRegionFiles, findConnectedRegions, scanRegions, type RegionInfo } from './services/region-loader.js';
+import { findConnectedRegions, scanRegions, type RegionInfo } from './services/region-loader.js';
 import { registerApiRoutes } from './routes/api.js';
-import { DEFAULT_PLAYER_DAYS, PLAYER_CACHE_VERSION } from '../shared/protocol.js';
+import { DEFAULT_PLAYER_DAYS } from '../shared/protocol.js';
+import type { WorldInfo } from '../shared/protocol.js';
 
 async function main() {
   const worldPath = config.worldPath;
@@ -31,47 +31,10 @@ async function main() {
   }
   console.log();
 
-  // 2. Try loading player cache, otherwise index fresh
-  const cacheFile = path.join(path.resolve(worldPath), '.player-index-cache.json');
-  let cacheLoaded = false;
-
-  if (fs.existsSync(cacheFile)) {
-    try {
-      console.log('Loading player index cache...');
-      const cacheData = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
-      if (cacheData?.version === PLAYER_CACHE_VERSION && Array.isArray(cacheData.players) && cacheData.players.length > 0) {
-        playerStore.addAll(cacheData.players);
-        console.log(`  Loaded ${playerStore.count} players from cache (v${PLAYER_CACHE_VERSION})\n`);
-        cacheLoaded = true;
-      } else {
-        console.log('  Cache version mismatch or old format, will re-index\n');
-      }
-    } catch (e) {
-      console.warn('  Cache invalid, will re-index\n');
-    }
-  }
-
-  if (!cacheLoaded) {
-    console.log('Indexing players...');
-    const players = await indexPlayers(worldPath, (progress) => {
-      process.stdout.write(
-        `\r  Progress: ${progress.processed}/${progress.total} (${progress.percent}%)`,
-      );
-    });
-    process.stdout.write('\n');
-    playerStore.addAll(players);
-    console.log(`  Indexed ${playerStore.count} players\n`);
-
-    // Cache for next startup
-    try {
-      const allPlayers = playerStore.getAll().players;
-      const cachePayload = { version: PLAYER_CACHE_VERSION, players: allPlayers };
-      fs.writeFileSync(cacheFile, JSON.stringify(cachePayload));
-      console.log(`  Saved player cache (v${PLAYER_CACHE_VERSION}) to ${cacheFile}\n`);
-    } catch (e) {
-      console.warn('  Failed to save cache:', e);
-    }
-  }
+  // 2. Players, intro progress, pack results and hub sessions
+  console.log('Loading players and flow data...');
+  await refreshData({ initial: true, serverVersion: worldInfo.mcVersion });
+  console.log();
 
   // 3. Collect all dimensions and compute dynamic bounds
   const allDimensions = new Set<string>(worldInfo.dimensions);
@@ -85,50 +48,9 @@ async function main() {
   const dimensionRegions = computeDynamicBounds(worldPath, worldInfo);
 
   // 4. Pre-render heatmaps (with default 30-day filter to match client default)
-  const defaultAfterDate = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
-  worldInfo.heatmapDensity = {};
-  for (const dimension of worldInfo.dimensions) {
-    const hasRegions = listRegionFiles(worldPath, dimension).length > 0;
-    if (!hasRegions) {
-      console.log(`No region files for ${dimension}, skipping`);
-    }
+  await renderDefaultHeatmaps(worldInfo, true);
 
-    try {
-      console.log(`Rendering heatmap for ${dimension} (last ${DEFAULT_PLAYER_DAYS} days)...`);
-      const result = await renderHeatmap(dimension, { afterDate: defaultAfterDate });
-      worldInfo.heatmapDensity[dimension] = {
-        maxPerChunk: result.maxPerChunk,
-        totalPlayers: result.totalPlayers,
-        contoursUrl: result.contoursUrl,
-      };
-    } catch (e) {
-      console.error(`  Failed to render heatmap for ${dimension}:`, e);
-    }
-  }
-
-  // 5. Pre-render block map tiles (ALL regions, not just connected)
-  for (const dimension of worldInfo.dimensions) {
-    const allRegions = scanRegions(worldPath, dimension);
-    if (allRegions.length === 0) continue;
-
-    const connected = dimensionRegions.get(dimension);
-    const t0 = performance.now();
-    console.log(`Pre-rendering tiles for ${dimension} (${allRegions.length} regions, ${connected?.length ?? 0} connected)...`);
-
-    const stats = await preRenderTiles(worldPath, dimension, allRegions, (done, total) => {
-      process.stdout.write(`\r  Tiles: ${done}/${total}`);
-    });
-    process.stdout.write('\n');
-
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
-    const parts = [];
-    if (stats.rendered > 0) parts.push(`${stats.rendered} rendered`);
-    if (stats.cached > 0) parts.push(`${stats.cached} cached`);
-    if (stats.failed > 0) parts.push(`${stats.failed} failed`);
-    console.log(`  ${parts.join(', ')} in ${elapsed}s`);
-  }
-
-  // 6. Start Fastify server
+  // 5. Start Fastify server
   const app = Fastify({ logger: false });
 
   // Request logging with timing — tile requests are aggregated to avoid noise
@@ -172,7 +94,6 @@ async function main() {
     done();
   });
 
-  await app.register(fastifyCors, { origin: true });
   await app.register(fastifyCompress);
 
   // Serve client build as root
@@ -184,23 +105,80 @@ async function main() {
     });
   }
 
-  // Serve static files (pre-rendered maps)
-  fs.mkdirSync(config.staticDir, { recursive: true });
-  await app.register(fastifyStatic, {
-    root: config.staticDir,
-    prefix: '/static/',
-    decorateReply: false,
-  });
-
   // API routes
   await registerApiRoutes(app, worldInfo);
 
   // Start
   await app.listen({ port: config.port, host: config.host });
-  console.log(`\nServer running at http://localhost:${config.port}`);
+  console.log(`\nServer running at http://${config.host}:${config.port}`);
   console.log(`  Players loaded: ${playerStore.count}`);
   console.log(`  Dimensions: ${worldInfo.dimensions.join(', ')}`);
-  console.log(`  Bounds: X[${config.bounds.minX}..${config.bounds.maxX}] Z[${config.bounds.minZ}..${config.bounds.maxZ}] (${config.bounds.maxX - config.bounds.minX}x${config.bounds.maxZ - config.bounds.minZ})`);
+  console.log(`  Bounds: X[${config.bounds.minX}..${config.bounds.maxX}] Z[${config.bounds.minZ}..${config.bounds.maxZ}] (${config.bounds.maxX - config.bounds.minX}x${config.bounds.maxZ - config.bounds.minZ})\n`);
+
+  // 6. Pre-render block map tiles (ALL regions, not just connected) in the
+  // background; tiles requested meanwhile are rendered on demand
+  scheduleRefresh(worldInfo);
+
+  if (process.env.PRERENDER_TILES !== '0') {
+    await preRenderAllTiles(worldPath, worldInfo, dimensionRegions)
+      .catch((e) => console.error('Tile pre-render failed:', e));
+  }
+}
+
+/** Startup heatmap per dimension, last 30 days, under a fixed id */
+async function renderDefaultHeatmaps(worldInfo: WorldInfo, verbose: boolean): Promise<void> {
+  const afterDate = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
+  const density: NonNullable<WorldInfo['heatmapDensity']> = {};
+  for (const dimension of worldInfo.dimensions) {
+    try {
+      if (verbose) console.log(`Rendering heatmap for ${dimension} (last ${DEFAULT_PLAYER_DAYS} days)...`);
+      density[dimension] = await renderHeatmap(dimension, { afterDate, quiet: !verbose });
+    } catch (e) {
+      console.error(`  Failed to render heatmap for ${dimension}:`, e);
+    }
+  }
+  worldInfo.heatmapDensity = density;
+}
+
+/** Re-read the data every REFRESH_MINUTES (default 15), one refresh at a time */
+function scheduleRefresh(worldInfo: WorldInfo): void {
+  const minutes = parseFloat(process.env.REFRESH_MINUTES || '15');
+  if (!(minutes > 0)) return;
+  setTimeout(async () => {
+    try {
+      await refreshData({ initial: false, serverVersion: worldInfo.mcVersion });
+      await renderDefaultHeatmaps(worldInfo, false);
+    } catch (e) {
+      console.error('Refresh failed:', e);
+    }
+    scheduleRefresh(worldInfo);
+  }, minutes * 60 * 1000);
+}
+
+async function preRenderAllTiles(
+  worldPath: string,
+  worldInfo: WorldInfo,
+  dimensionRegions: Map<string, RegionInfo[]>,
+): Promise<void> {
+  for (const dimension of worldInfo.dimensions) {
+    const allRegions = scanRegions(worldPath, dimension);
+    if (allRegions.length === 0) continue;
+
+    const connected = dimensionRegions.get(dimension);
+    const t0 = performance.now();
+    console.log(`Pre-rendering tiles for ${dimension} (${allRegions.length} regions, ${connected?.length ?? 0} connected)...`);
+
+    const stats = await preRenderTiles(worldPath, dimension, allRegions, (done, total) => {
+      if (done % 200 === 0 && done < total) console.log(`  [tiles] ${dimension}: ${done}/${total}`);
+    });
+
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    const parts = [];
+    if (stats.rendered > 0) parts.push(`${stats.rendered} rendered`);
+    if (stats.cached > 0) parts.push(`${stats.cached} cached`);
+    if (stats.failed > 0) parts.push(`${stats.failed} failed`);
+    console.log(`  [tiles] ${dimension}: ${parts.join(', ')} in ${elapsed}s`);
+  }
 }
 
 /**
@@ -211,7 +189,7 @@ async function main() {
  */
 function computeDynamicBounds(
   worldPath: string,
-  worldInfo: import('../shared/protocol.js').WorldInfo,
+  worldInfo: WorldInfo,
 ): Map<string, RegionInfo[]> {
   let minX = Infinity, maxX = -Infinity;
   let minZ = Infinity, maxZ = -Infinity;
@@ -247,7 +225,7 @@ function computeDynamicBounds(
   }
 
   // Log player position distribution (for diagnostics, not bounds)
-  const allPlayers = playerStore.getAll().players;
+  const allPlayers = playerStore.all();
   let playerMinX = Infinity, playerMaxX = -Infinity;
   let playerMinZ = Infinity, playerMaxZ = -Infinity;
   let playerCount = 0;

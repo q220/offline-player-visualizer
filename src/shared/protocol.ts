@@ -5,10 +5,26 @@ export interface PlayerRecord {
   z: number;
   y: number;
   dimension: string;
+  /** mtime of the player file; also the key for incremental re-indexing */
   lastModified: number;
+  /** Bukkit firstPlayed (epoch ms) */
   firstJoined?: number;
+  /** Bukkit lastPlayed, else Paper LastSeen (epoch ms) */
   lastOnline?: number;
-  hasHeadItem: boolean;
+}
+
+/**
+ * Hub intro progress (MCME-Introduction): finished, or the room the player
+ * gave up in ('welcome' screen or 'compatibility' check). 'other' = neither.
+ */
+export type IntroStatus = 'finished' | 'welcome' | 'compatibility' | 'other';
+
+/**
+ * When the player was last online. File mtimes are unreliable on their own:
+ * bulk copies give hundreds of thousands of files the same mtime.
+ */
+export function lastSeen(p: PlayerRecord): number {
+  return p.lastOnline ?? p.lastModified;
 }
 
 export interface WorldInfo {
@@ -24,7 +40,7 @@ export interface WorldInfo {
   };
   spawn?: { x: number; z: number };
   /** Per-dimension heatmap density info for the legend */
-  heatmapDensity?: Record<string, { maxPerChunk: number; totalPlayers: number; contoursUrl: string }>;
+  heatmapDensity?: Record<string, HeatmapRenderResponse>;
   /** Bounds that encompass all player positions (may extend beyond region bounds) */
   playerBounds?: {
     minX: number;
@@ -97,7 +113,8 @@ export interface PlayerItem {
   y: number;
   firstJoined?: number;
   lastOnline?: number;
-  hasHeadItem: boolean;
+  /** Absent when the intro plugin's files were not found */
+  introStatus?: IntroStatus;
 }
 
 export interface ClustersResponse {
@@ -109,18 +126,165 @@ export interface ClustersResponse {
 /** Default number of days to show players for */
 export const DEFAULT_PLAYER_DAYS = 30;
 
-export interface HubMetrics {
-  since: number;
-  totalPlayers: number;
-  withHeadItem: number;
-  withoutHeadItem: number;
-  singleSession: number;
-}
-
 export interface DropoutHeatmapRequest extends HeatmapRenderRequest {
   cutoffDate?: number;
 }
 
 export const DEFAULT_HUB_DATE = new Date('2026-02-16').getTime();
-export const SINGLE_SESSION_TOLERANCE_MS = 3_600_000;
-export const PLAYER_CACHE_VERSION = 2;
+export const PLAYER_CACHE_VERSION = 4;
+
+/* ---- Hub player flow ---- */
+
+/** Last resource pack result MCME-Architect recorded for a player */
+export type PackResult = 'loaded' | 'failed_reload' | 'failed_download' | 'declined' | 'no_result' | 'not_sent';
+
+export interface PackInfo {
+  /** Pack name from the release URL (e.g. Human); '' when no pack was sent */
+  pack: string;
+  version: string;
+  /** Release file name, e.g. Human-Vanilla */
+  variant: string;
+  result: PackResult;
+}
+
+/** Counts for a group of new players */
+export interface FlowCounts {
+  players: number;
+  finished: number;
+  welcome: number;
+  compatibility: number;
+  other: number;
+  /** Players the proxy logs cover (joined after the oldest proxy log) */
+  activityKnown: number;
+  /** ...of those, went on to a server other than the hub */
+  reachedServer: number;
+  /** ...of those, finished the intro first (the funnel's third step) */
+  finishedMovedOn: number;
+  /** ...of those, first joined at least 7 days before the data was read */
+  returnEligible: number;
+  /** ...of those, connected again on a later day within 7 days */
+  returned7d: number;
+  /** Players with a pack record, and how those ended */
+  packKnown: number;
+  packLoaded: number;
+  packFailed: number;
+  packDeclined: number;
+}
+
+export interface FlowBucket extends FlowCounts {
+  /** Bucket start (local midnight, or Monday for weeks), epoch ms */
+  start: number;
+}
+
+export interface FlowPlayer {
+  uuid: string;
+  name?: string;
+  firstJoined: number;
+  lastOnline?: number;
+  outcome: IntroStatus;
+  pack?: PackInfo;
+  /** Hub sessions in the server logs; absent when the first join predates the oldest log */
+  sessions?: number;
+  firstSessionMs?: number;
+  /** Went on to a server other than the hub; absent without proxy-log coverage */
+  reachedServer?: boolean;
+  /** Connected again on a later day within 7 days; absent when unknown or too recent */
+  returned7d?: boolean;
+  /** Game version of the client's latest join (from Plan); absent when unknown */
+  clientVersion?: string;
+  x: number;
+  y: number;
+  z: number;
+  dimension: string;
+}
+
+export type SignalLevel = 'critical' | 'warning' | 'info' | 'good';
+
+export interface FlowSignal {
+  /** Stable across refreshes while the same problem lasts, e.g. 'completion' or 'client-version:26.3' */
+  id: string;
+  level: SignalLevel;
+  title: string;
+  detail: string;
+}
+
+/** A dated change (update, pack release) drawn on the flow charts */
+export interface FlowEvent {
+  date: string;
+  label: string;
+}
+
+export interface PackGroup extends FlowCounts {
+  pack: string;
+  version: string;
+  variant: string;
+}
+
+export interface ClientGroup extends FlowCounts {
+  /** ViaVersion's name for the client protocol, or 'Unknown' */
+  version: string;
+  /** The server's own version: intro room 2 only lets these through on its own */
+  matchesServer: boolean;
+}
+
+export interface PackResultGroup extends FlowCounts {
+  result: PackResult | 'unknown';
+}
+
+/** All players whose latest pack is this release, regardless of when they joined */
+export interface PackHealthRow {
+  pack: string;
+  version: string;
+  variant: string;
+  players: number;
+  loaded: number;
+  failed: number;
+  declined: number;
+  /** Whether new players got this release in the last 14 days */
+  current: boolean;
+}
+
+export interface SessionStats {
+  outcome: IntroStatus;
+  /** New players in the range with log coverage */
+  players: number;
+  medianSessions: number | null;
+  /** Players with two or more hub sessions */
+  multiSession: number;
+  medianFirstSessionMs: number | null;
+}
+
+export interface FlowResponse {
+  generatedAt: number;
+  sources: { intro: boolean; packs: boolean; clients: boolean; sessionsFrom: number | null; activityFrom: number | null };
+  /** The hub's Minecraft version */
+  serverVersion: string;
+  range: { from: number; to: number; bucket: 'day' | 'week' };
+  previous: { from: number; to: number } | null;
+  totals: FlowCounts;
+  previousTotals: FlowCounts | null;
+  series: FlowBucket[];
+  byPackResult: PackResultGroup[];
+  byClient: ClientGroup[];
+  byPack: PackGroup[];
+  sessions: SessionStats[];
+  events: FlowEvent[];
+  signals: FlowSignal[];
+  /** The fixed window the signals compare: [from, to] against [baselineFrom, from) */
+  signalWindow: { from: number; to: number; baselineFrom: number };
+  packHealth: PackHealthRow[];
+}
+
+/** The current signals alone, for watchers such as the admin dashboard */
+export interface FlowSignalsResponse {
+  generatedAt: number;
+  window: { from: number; to: number; baselineFrom: number };
+  /** Every data source loaded: a signal missing now really means the problem is gone */
+  complete: boolean;
+  signals: FlowSignal[];
+}
+
+export interface FlowPlayersResponse {
+  total: number;
+  players: FlowPlayer[];
+}

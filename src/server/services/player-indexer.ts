@@ -1,7 +1,12 @@
 import fs from 'fs';
 import path from 'path';
+import nbt from 'prismarine-nbt';
 import type { PlayerRecord } from '../../shared/protocol.js';
-import { config } from '../config.js';
+import { getPlayerDataDir } from './world-scanner.js';
+
+/** Files read and parsed at once; file I/O and gunzip run on the libuv pool */
+const PARSE_CONCURRENCY = 32;
+const PROGRESS_EVERY = 2000;
 
 interface IndexProgress {
   total: number;
@@ -11,160 +16,138 @@ interface IndexProgress {
 
 type ProgressCallback = (progress: IndexProgress) => void;
 
+export interface IndexResult {
+  players: PlayerRecord[];
+  /** Files parsed this run (new or changed since the cache) */
+  parsed: number;
+  /** Records reused from the cache because the file mtime was unchanged */
+  reused: number;
+  failed: number;
+}
+
+/**
+ * Index all player files. A record in `previous` is reused when its file's
+ * mtime is unchanged, so after the first run only re-saved files are parsed.
+ */
 export async function indexPlayers(
   worldPath: string,
+  previous: Map<string, PlayerRecord>,
   onProgress?: ProgressCallback,
-): Promise<PlayerRecord[]> {
+): Promise<IndexResult> {
+  const result: IndexResult = { players: [], parsed: 0, reused: 0, failed: 0 };
   const absPath = path.resolve(worldPath);
-  const playerDataDir = path.join(absPath, 'playerdata');
+  const playerDataDir = getPlayerDataDir(absPath);
 
-  if (!fs.existsSync(playerDataDir)) {
-    console.warn('No playerdata directory found');
-    return [];
+  if (!playerDataDir) {
+    console.warn('No player data directory found (players/data or playerdata)');
+    return result;
   }
 
-  // Load usercache for name resolution
+  // Fallback for files without bukkit.lastKnownName (non-Paper worlds)
   const nameMap = loadUsercache(absPath);
 
-  // Get all .dat files
-  const allFiles = fs
-    .readdirSync(playerDataDir)
-    .filter((f) => f.endsWith('.dat'))
-    .map((f) => path.join(playerDataDir, f));
+  const files = fs.readdirSync(playerDataDir).filter((f) => f.endsWith('.dat'));
+  const total = files.length;
+  console.log(`Found ${total} player data files in ${playerDataDir}`);
 
-  const total = allFiles.length;
-  console.log(`Found ${total} player data files`);
-
-  if (total === 0) return [];
-
-  // Split into batches
-  const { batchSize } = config.playerIndexing;
-  const batches: string[][] = [];
-  for (let i = 0; i < allFiles.length; i += batchSize) {
-    batches.push(allFiles.slice(i, i + batchSize));
-  }
-
-  // Process batches inline (prismarine-nbt parse is async but fast)
+  let next = 0;
   let processed = 0;
-  const allPlayers: PlayerRecord[] = [];
-  const { parse } = await import('prismarine-nbt');
 
-  for (const batch of batches) {
-    const batchResults = await parseBatch(batch, parse);
+  async function worker(): Promise<void> {
+    while (next < total) {
+      const file = files[next++];
+      const uuid = path.basename(file, '.dat');
+      const filePath = path.join(playerDataDir!, file);
 
-    for (const p of batchResults) {
-      const name = nameMap.get(p.uuid);
-      if (name) p.name = name;
-    }
-
-    allPlayers.push(...batchResults);
-    processed += batch.length;
-
-    onProgress?.({
-      total,
-      processed: Math.min(processed, total),
-      percent: Math.round((Math.min(processed, total) / total) * 100),
-    });
-  }
-
-  console.log(`Indexed ${allPlayers.length} players`);
-  return allPlayers;
-}
-
-function nbtLongToNumber(val: unknown): number | undefined {
-  if (val == null) return undefined;
-  if (typeof val === 'number') return val;
-  if (typeof val === 'bigint') return Number(val);
-  if (Array.isArray(val) && val.length === 2) {
-    const low = val[0] >>> 0;
-    const high = val[1];
-    const big = (BigInt(high) << 32n) | BigInt(low);
-    return Number(big);
-  }
-  return undefined;
-}
-
-async function parseBatch(
-  files: string[],
-  parse: (buffer: Buffer) => Promise<{ parsed: any; type: string }>,
-): Promise<PlayerRecord[]> {
-  const results: PlayerRecord[] = [];
-
-  for (const filePath of files) {
-    try {
-      const buffer = fs.readFileSync(filePath);
-      const stat = fs.statSync(filePath);
-      const { parsed } = await parse(buffer);
-      const root = parsed.value as any;
-
-      // Extract position
-      const pos = root.Pos?.value?.value;
-      if (!pos || pos.length < 3) continue;
-
-      const x = pos[0];
-      const y = pos[1];
-      const z = pos[2];
-
-      // Extract dimension
-      let dimension = root.Dimension?.value;
-      if (typeof dimension === 'number') {
-        switch (dimension) {
-          case -1:
-            dimension = 'minecraft:the_nether';
-            break;
-          case 1:
-            dimension = 'minecraft:the_end';
-            break;
-          default:
-            dimension = 'minecraft:overworld';
+      try {
+        const { mtimeMs } = await fs.promises.stat(filePath);
+        const cached = previous.get(uuid);
+        let record: PlayerRecord | null;
+        if (cached && cached.lastModified === mtimeMs) {
+          record = cached;
+          result.reused++;
+        } else {
+          record = await parsePlayerFile(filePath, uuid, mtimeMs);
+          result.parsed++;
         }
-      } else if (typeof dimension !== 'string') {
-        dimension = 'minecraft:overworld';
+        if (record) {
+          record.name ??= nameMap.get(uuid);
+          result.players.push(record);
+        }
+      } catch {
+        // Corrupt, or removed while indexing
+        result.failed++;
       }
 
-      // UUID from filename
-      const uuid = path.basename(filePath, '.dat');
-
-      const bukkit = root.bukkit?.value;
-      const firstJoined = nbtLongToNumber(bukkit?.firstPlayed?.value);
-      const lastOnline = nbtLongToNumber(bukkit?.lastPlayed?.value);
-
-      let hasHeadItem = false;
-      const inventory = root.Inventory?.value?.value;
-      if (Array.isArray(inventory)) {
-        hasHeadItem = inventory.some(
-          (item: any) => item.Slot?.value === 103,
-        );
+      processed++;
+      if (processed % PROGRESS_EVERY === 0 || processed === total) {
+        onProgress?.({ total, processed, percent: Math.round((processed / total) * 100) });
       }
-
-      results.push({
-        uuid, x, y, z, dimension,
-        lastModified: stat.mtimeMs,
-        firstJoined, lastOnline, hasHeadItem,
-      });
-    } catch {
-      // Skip corrupt files
     }
   }
 
-  return results;
+  await Promise.all(Array.from({ length: PARSE_CONCURRENCY }, worker));
+  return result;
+}
+
+async function parsePlayerFile(
+  filePath: string,
+  uuid: string,
+  mtimeMs: number,
+): Promise<PlayerRecord | null> {
+  const { parsed } = await nbt.parse(await fs.promises.readFile(filePath));
+  const root = parsed.value as any;
+
+  const pos = root.Pos?.value?.value;
+  if (!pos || pos.length < 3) return null;
+
+  const bukkit = root.bukkit?.value;
+  const paper = root.Paper?.value;
+
+  return {
+    uuid,
+    name: bukkit?.lastKnownName?.value,
+    x: pos[0],
+    y: pos[1],
+    z: pos[2],
+    dimension: parseDimension(root.Dimension?.value),
+    lastModified: mtimeMs,
+    firstJoined: toTimestamp(bukkit?.firstPlayed?.value),
+    lastOnline: toTimestamp(bukkit?.lastPlayed?.value) ?? toTimestamp(paper?.LastSeen?.value),
+  };
+}
+
+function parseDimension(value: unknown): string {
+  if (typeof value === 'string') return value;
+  // Pre-1.16 numeric ids
+  switch (value) {
+    case -1:
+      return 'minecraft:the_nether';
+    case 1:
+      return 'minecraft:the_end';
+    default:
+      return 'minecraft:overworld';
+  }
+}
+
+/** prismarine-nbt gives a long as [high, low] signed 32-bit halves */
+function toTimestamp(val: unknown): number | undefined {
+  let ms: number | undefined;
+  if (typeof val === 'number') ms = val;
+  else if (typeof val === 'bigint') ms = Number(val);
+  else if (Array.isArray(val) && val.length === 2) {
+    ms = Number((BigInt(val[0]) << 32n) | BigInt(val[1] >>> 0));
+  }
+  return ms !== undefined && ms > 0 ? ms : undefined;
 }
 
 function loadUsercache(worldPath: string): Map<string, string> {
-  const nameMap = new Map<string, string>();
-  const cacheFile = path.join(worldPath, 'usercache.json');
-
-  if (!fs.existsSync(cacheFile)) {
-    // Try parent dir (server root vs world folder)
-    const parentCache = path.join(path.dirname(worldPath), 'usercache.json');
-    if (fs.existsSync(parentCache)) {
-      return parseUsercache(parentCache);
-    }
-    console.warn('No usercache.json found, names will not be resolved');
-    return nameMap;
+  // Usually in the server root, next to the world folder
+  for (const file of [path.join(worldPath, 'usercache.json'), path.join(path.dirname(worldPath), 'usercache.json')]) {
+    if (fs.existsSync(file)) return parseUsercache(file);
   }
-
-  return parseUsercache(cacheFile);
+  console.warn('No usercache.json found');
+  return new Map();
 }
 
 function parseUsercache(filePath: string): Map<string, string> {

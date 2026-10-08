@@ -1,6 +1,7 @@
-import type { WorldInfo, ClustersResponse } from '../shared/protocol';
+import type { WorldInfo, ClustersResponse, IntroStatus } from '../shared/protocol';
 import { DEFAULT_PLAYER_DAYS } from '../shared/protocol';
 import { apiUrl } from './api';
+import { escapeHtml } from './html';
 import { getMap } from './map';
 import { setStatus, clearStatus } from './status';
 
@@ -17,6 +18,13 @@ let viewportCountEl: HTMLDivElement | null = null;
 let storedWorldInfo: WorldInfo;
 let extendedBoundsMode = false;
 let areaBoundsOverride: { minX: number; maxX: number; minZ: number; maxZ: number } | null = null;
+
+const INTRO_LABELS: Record<IntroStatus, string> = {
+  finished: 'Finished',
+  welcome: 'Stuck at welcome screen',
+  compatibility: 'Stuck at compatibility check',
+  other: 'Not finished',
+};
 
 /** Set to the default 30-day window initially */
 afterFilter = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
@@ -148,13 +156,12 @@ function renderItems(data: ClustersResponse, zoom: number): void {
       const lastOnlineStr = item.lastOnline
         ? new Date(item.lastOnline).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
         : 'Unknown';
-      const introStatus = item.hasHeadItem ? "Didn't interact" : 'Got past intro';
+      const introStatus = item.introStatus ? INTRO_LABELS[item.introStatus] : 'Unknown';
 
-      // innerHTML is safe here: all data comes from server (usercache.json), not user input
       dot.bindPopup(
         `<div class="player-popup">
-          <div class="popup-name">${item.name || 'Unknown'}</div>
-          <div class="popup-info">UUID: ${item.uuid}</div>
+          <div class="popup-name">${escapeHtml(item.name || 'Unknown')}</div>
+          <div class="popup-info">UUID: ${escapeHtml(item.uuid)}</div>
           <div class="popup-info">Pos: ${Math.round(item.x)}, ${Math.round(item.y)}, ${Math.round(item.z)}</div>
           <div class="popup-info">First joined: ${firstJoinedStr}</div>
           <div class="popup-info">Last online: ${lastOnlineStr}</div>
@@ -188,7 +195,7 @@ function renderItems(data: ClustersResponse, zoom: number): void {
       }).setContent(countLabel);
       circle.bindTooltip(tooltip);
 
-      const names = item.names.join(', ');
+      const names = item.names.map(escapeHtml).join(', ');
       const extra = item.count > item.names.length
         ? ` and ${item.count - item.names.length} more`
         : '';
