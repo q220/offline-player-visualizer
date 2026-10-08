@@ -114,7 +114,6 @@ async function parsePlayerFile(
     lastModified: mtimeMs,
     firstJoined: toTimestamp(bukkit?.firstPlayed?.value),
     lastOnline: toTimestamp(bukkit?.lastPlayed?.value) ?? toTimestamp(paper?.LastSeen?.value),
-    hasHeadItem: hasHeadItem(root),
   };
 }
 
@@ -129,13 +128,6 @@ function parseDimension(value: unknown): string {
     default:
       return 'minecraft:overworld';
   }
-}
-
-/** The head slot is equipment.head since 1.21.5, Inventory slot 103 before */
-function hasHeadItem(root: any): boolean {
-  if (root.equipment?.value?.head) return true;
-  const inventory = root.Inventory?.value?.value;
-  return Array.isArray(inventory) && inventory.some((item: any) => item.Slot?.value === 103);
 }
 
 /** prismarine-nbt gives a long as [high, low] signed 32-bit halves */

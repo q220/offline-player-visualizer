@@ -8,6 +8,7 @@ import { scanWorld } from './services/world-scanner.js';
 import { indexPlayers } from './services/player-indexer.js';
 import { loadPlayerCache, savePlayerCache, playerCacheFile } from './services/player-cache.js';
 import { playerStore } from './services/player-store.js';
+import { loadIntroData } from './services/intro-progress.js';
 import { renderHeatmap } from './services/heatmap-renderer.js';
 import { preRenderTiles } from './services/map-renderer.js';
 import { findConnectedRegions, scanRegions, type RegionInfo } from './services/region-loader.js';
@@ -56,6 +57,16 @@ async function main() {
     }
   }
   console.log();
+
+  // Hub intro progress (MCME-Introduction), if its files are next to the world
+  const intro = loadIntroData(worldPath);
+  playerStore.setIntroData(intro);
+  if (intro) {
+    const rooms = [intro.welcomeRoom && 'welcome', intro.compatibilityRoom && 'compatibility'].filter(Boolean);
+    console.log(`Intro progress: ${intro.finished.size} players finished; rooms: ${rooms.join(', ') || 'none found'}\n`);
+  } else {
+    console.log('Intro progress: MCME-Introduction files not found, intro metrics off\n');
+  }
 
   // 3. Collect all dimensions and compute dynamic bounds
   const allDimensions = new Set<string>(worldInfo.dimensions);

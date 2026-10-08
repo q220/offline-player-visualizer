@@ -11,8 +11,13 @@ export interface PlayerRecord {
   firstJoined?: number;
   /** Bukkit lastPlayed, else Paper LastSeen (epoch ms) */
   lastOnline?: number;
-  hasHeadItem: boolean;
 }
+
+/**
+ * Hub intro progress (MCME-Introduction): finished, or the room the player
+ * gave up in ('welcome' screen or 'compatibility' check). 'other' = neither.
+ */
+export type IntroStatus = 'finished' | 'welcome' | 'compatibility' | 'other';
 
 /**
  * When the player was last online. File mtimes are unreliable on their own:
@@ -108,7 +113,8 @@ export interface PlayerItem {
   y: number;
   firstJoined?: number;
   lastOnline?: number;
-  hasHeadItem: boolean;
+  /** Absent when the intro plugin's files were not found */
+  introStatus?: IntroStatus;
 }
 
 export interface ClustersResponse {
@@ -123,8 +129,8 @@ export const DEFAULT_PLAYER_DAYS = 30;
 export interface HubMetrics {
   since: number;
   totalPlayers: number;
-  withHeadItem: number;
-  withoutHeadItem: number;
+  /** Intro progress counts; null when the intro plugin's files were not found */
+  intro: Record<IntroStatus, number> | null;
   singleSession: number;
 }
 
@@ -134,4 +140,4 @@ export interface DropoutHeatmapRequest extends HeatmapRenderRequest {
 
 export const DEFAULT_HUB_DATE = new Date('2026-02-16').getTime();
 export const SINGLE_SESSION_TOLERANCE_MS = 3_600_000;
-export const PLAYER_CACHE_VERSION = 3;
+export const PLAYER_CACHE_VERSION = 4;

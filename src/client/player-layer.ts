@@ -1,4 +1,4 @@
-import type { WorldInfo, ClustersResponse } from '../shared/protocol';
+import type { WorldInfo, ClustersResponse, IntroStatus } from '../shared/protocol';
 import { DEFAULT_PLAYER_DAYS } from '../shared/protocol';
 import { apiUrl } from './api';
 import { escapeHtml } from './html';
@@ -18,6 +18,13 @@ let viewportCountEl: HTMLDivElement | null = null;
 let storedWorldInfo: WorldInfo;
 let extendedBoundsMode = false;
 let areaBoundsOverride: { minX: number; maxX: number; minZ: number; maxZ: number } | null = null;
+
+const INTRO_LABELS: Record<IntroStatus, string> = {
+  finished: 'Finished',
+  welcome: 'Stuck at welcome screen',
+  compatibility: 'Stuck at compatibility check',
+  other: 'Not finished',
+};
 
 /** Set to the default 30-day window initially */
 afterFilter = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
@@ -149,7 +156,7 @@ function renderItems(data: ClustersResponse, zoom: number): void {
       const lastOnlineStr = item.lastOnline
         ? new Date(item.lastOnline).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
         : 'Unknown';
-      const introStatus = item.hasHeadItem ? "Didn't interact" : 'Got past intro';
+      const introStatus = item.introStatus ? INTRO_LABELS[item.introStatus] : 'Unknown';
 
       dot.bindPopup(
         `<div class="player-popup">

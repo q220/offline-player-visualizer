@@ -40,26 +40,26 @@ async function fetchHubMetrics(since: number): Promise<void> {
 }
 
 function renderHubMetrics(data: HubMetrics): void {
-  const totalEl = document.getElementById('hm-total');
-  const headItemEl = document.getElementById('hm-head-item');
-  const noHeadItemEl = document.getElementById('hm-no-head-item');
-  const singleSessionEl = document.getElementById('hm-single-session');
-
-  if (totalEl) {
-    totalEl.textContent = data.totalPlayers.toLocaleString();
-  }
-
   const pct = (n: number) =>
     data.totalPlayers > 0 ? ((n / data.totalPlayers) * 100).toFixed(1) : '0.0';
 
   // innerHTML is safe here: all values are server-controlled numbers, not user input
-  if (headItemEl) {
-    headItemEl.innerHTML = `${data.withHeadItem.toLocaleString()}<span class="metric-pct">(${pct(data.withHeadItem)}%)</span>`;
-  }
-  if (noHeadItemEl) {
-    noHeadItemEl.innerHTML = `${data.withoutHeadItem.toLocaleString()}<span class="metric-pct">(${pct(data.withoutHeadItem)}%)</span>`;
-  }
-  if (singleSessionEl) {
-    singleSessionEl.innerHTML = `${data.singleSession.toLocaleString()}<span class="metric-pct">(${pct(data.singleSession)}%)</span>`;
-  }
+  const setCount = (id: string, n: number | undefined) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = n === undefined
+      ? 'n/a'
+      : `${n.toLocaleString()}<span class="metric-pct">(${pct(n)}%)</span>`;
+  };
+
+  const totalEl = document.getElementById('hm-total');
+  if (totalEl) totalEl.textContent = data.totalPlayers.toLocaleString();
+
+  setCount('hm-intro-finished', data.intro?.finished);
+  setCount('hm-intro-welcome', data.intro?.welcome);
+  setCount('hm-intro-compatibility', data.intro?.compatibility);
+  setCount('hm-intro-other', data.intro?.other);
+  const otherRow = document.getElementById('hm-intro-other-row');
+  if (otherRow) otherRow.hidden = !data.intro?.other;
+  setCount('hm-single-session', data.singleSession);
 }

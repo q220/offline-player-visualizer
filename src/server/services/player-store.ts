@@ -1,5 +1,6 @@
-import type { PlayerRecord, ClusterItem, PlayerItem, ClustersResponse, HubMetrics } from '../../shared/protocol.js';
+import type { PlayerRecord, ClusterItem, PlayerItem, ClustersResponse, HubMetrics, IntroStatus } from '../../shared/protocol.js';
 import { SINGLE_SESSION_TOLERANCE_MS, lastSeen } from '../../shared/protocol.js';
+import { introStatus, type IntroData } from './intro-progress.js';
 
 /** Grid cell size in blocks for spatial indexing */
 const SPATIAL_CELL_SIZE = 256;
@@ -17,13 +18,6 @@ function spatialKey(cx: number, cz: number): string {
   return `${cx},${cz}`;
 }
 
-function toPlayerItem(p: PlayerRecord): PlayerItem {
-  return {
-    type: 'player', uuid: p.uuid, name: p.name, x: p.x, z: p.z, y: p.y,
-    firstJoined: p.firstJoined, lastOnline: p.lastOnline, hasHeadItem: p.hasHeadItem,
-  };
-}
-
 function isSingleSession(p: PlayerRecord): boolean {
   return !p.lastOnline || !p.firstJoined ||
     Math.abs(p.lastOnline - p.firstJoined) < SINGLE_SESSION_TOLERANCE_MS;
@@ -36,6 +30,19 @@ export class PlayerStore {
   private named: { key: string; player: PlayerRecord }[] = [];
   /** Spatial grid index: dimension → (cellKey → players in that cell) */
   private spatialGrid = new Map<string, Map<string, SpatialCell>>();
+  private intro: IntroData | null = null;
+
+  setIntroData(intro: IntroData | null): void {
+    this.intro = intro;
+  }
+
+  private toPlayerItem(p: PlayerRecord): PlayerItem {
+    return {
+      type: 'player', uuid: p.uuid, name: p.name, x: p.x, z: p.z, y: p.y,
+      firstJoined: p.firstJoined, lastOnline: p.lastOnline,
+      introStatus: this.intro ? introStatus(this.intro, p) : undefined,
+    };
+  }
 
   addAll(players: PlayerRecord[]): void {
     for (const p of players) {
@@ -210,7 +217,7 @@ export class PlayerStore {
 
     // At high zoom, return individual players (capped)
     if (opts.zoom >= 2) {
-      return { totalInView, items: visible.slice(0, 2000).map(toPlayerItem) };
+      return { totalInView, items: visible.slice(0, 2000).map((p) => this.toPlayerItem(p)) };
     }
 
     // At low zoom, grid-cluster
@@ -241,7 +248,7 @@ export class PlayerStore {
     const items: (ClusterItem | PlayerItem)[] = [];
     for (const cell of clusterGrid.values()) {
       if (cell.count === 1) {
-        items.push(toPlayerItem(cell.first));
+        items.push(this.toPlayerItem(cell.first));
       } else {
         items.push({
           type: 'cluster',
@@ -263,17 +270,17 @@ export class PlayerStore {
 
   getHubMetrics(since: number): HubMetrics {
     let totalPlayers = 0;
-    let withHeadItem = 0;
     let singleSession = 0;
+    const intro: Record<IntroStatus, number> = { finished: 0, welcome: 0, compatibility: 0, other: 0 };
 
     for (const p of this.byUuid.values()) {
       if (!p.firstJoined || p.firstJoined < since) continue;
       totalPlayers++;
-      if (p.hasHeadItem) withHeadItem++;
+      if (this.intro) intro[introStatus(this.intro, p)]++;
       if (isSingleSession(p)) singleSession++;
     }
 
-    return { since, totalPlayers, withHeadItem, withoutHeadItem: totalPlayers - withHeadItem, singleSession };
+    return { since, totalPlayers, intro: this.intro ? intro : null, singleSession };
   }
 }
 

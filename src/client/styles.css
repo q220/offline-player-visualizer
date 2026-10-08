@@ -87,6 +87,10 @@ body {
   color: var(--text-secondary);
 }
 
+.info-item[hidden] {
+  display: none;
+}
+
 /* Search */
 .search-box {
   position: relative;
