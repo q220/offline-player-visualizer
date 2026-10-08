@@ -10,7 +10,7 @@ A web tool that reads a Minecraft Java Edition world folder, renders a top-down 
 - **Dimension switching** - Toggle between Overworld, Nether, and End
 - **Date filtering** - Filter players by last login date, re-render heatmap on the fly
 - **Player dots** - Individual player markers appear when zoomed in
-- **Hub intro metrics** - New players since a date, head-slot status, single-session dropouts and a dropout heatmap
+- **Hub intro metrics** - New players since a date: finished the intro, stuck at the welcome screen or the compatibility check (from MCME-Introduction's `finishedPlayerList.uid` and room boxes in `locations.yml`; set `INTRO_DIR` if the plugin folder is not next to the world), single-session dropouts and a dropout heatmap
 - **Incremental indexing** - After the first run only player files saved since the last start are parsed again
 - **World formats** - Reads both the 26.1+ layout (`dimensions/`, `players/data/`) and the older one (`region/`, `DIM-1/`, `playerdata/`)
 
