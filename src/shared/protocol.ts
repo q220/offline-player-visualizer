@@ -131,7 +131,6 @@ export interface DropoutHeatmapRequest extends HeatmapRenderRequest {
 }
 
 export const DEFAULT_HUB_DATE = new Date('2026-02-16').getTime();
-export const SINGLE_SESSION_TOLERANCE_MS = 3_600_000;
 export const PLAYER_CACHE_VERSION = 4;
 
 /* ---- Hub player flow ---- */
@@ -202,6 +201,8 @@ export interface FlowPlayer {
 export type SignalLevel = 'critical' | 'warning' | 'info' | 'good';
 
 export interface FlowSignal {
+  /** Stable across refreshes while the same problem lasts, e.g. 'completion' or 'client-version:26.3' */
+  id: string;
   level: SignalLevel;
   title: string;
   detail: string;
@@ -272,6 +273,13 @@ export interface FlowResponse {
   /** The fixed window the signals compare: [from, to] against [baselineFrom, from) */
   signalWindow: { from: number; to: number; baselineFrom: number };
   packHealth: PackHealthRow[];
+}
+
+/** The current signals alone, for watchers such as the admin dashboard */
+export interface FlowSignalsResponse {
+  generatedAt: number;
+  window: { from: number; to: number; baselineFrom: number };
+  signals: FlowSignal[];
 }
 
 export interface FlowPlayersResponse {

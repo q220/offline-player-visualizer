@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type {
-  ClientGroup, FlowBucket, FlowCounts, FlowEvent, FlowPlayer, FlowResponse, FlowSignal, IntroStatus,
+  ClientGroup, FlowBucket, FlowCounts, FlowEvent, FlowPlayer, FlowResponse, FlowSignal, FlowSignalsResponse, IntroStatus,
   PackGroup, PackHealthRow, PackInfo, PackResult, PackResultGroup, PlayerRecord, SessionStats,
 } from '../../shared/protocol.js';
 import { clientVersionName } from '../../shared/constants.js';
@@ -9,6 +9,7 @@ import { DEFAULT_HUB_DATE } from '../../shared/protocol.js';
 import { introStatus, type IntroData } from './intro-progress.js';
 import type { SessionData } from './hub-sessions.js';
 import type { ProxyActivity } from './proxy-activity.js';
+import type { FlowHistory, LoggedFields } from './flow-history.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const RETURN_WINDOW_MS = 7 * DAY;
@@ -36,6 +37,8 @@ export interface FlowSources {
   activity: ProxyActivity | null;
   /** Client protocol by UUID (Plan) */
   clients: Map<string, number> | null;
+  /** What the logs said before they were deleted */
+  history: FlowHistory | null;
   serverVersion: string;
   events: FlowEvent[];
 }
@@ -129,6 +132,8 @@ export class FlowModel {
   /** New players since the hub intro opened, newest first */
   private readonly flowPlayers: FlowPlayer[];
   private readonly packHealthRows: PackHealthRow[];
+  /** What the current logs say about each covered player, to keep in the history */
+  private readonly fromLogs = new Map<string, { firstJoined: number; logged: LoggedFields }>();
 
   constructor(private readonly src: FlowSources, readonly generatedAt = Date.now()) {
     this.flowPlayers = src.players
@@ -153,24 +158,48 @@ export class FlowModel {
       z: p.z,
       dimension: p.dimension,
     };
+    const logged: LoggedFields = {};
     const s = this.src.sessions;
     if (s && firstJoined >= s.coverageStart) {
       const sessions = s.byUuid.get(p.uuid) ?? [];
-      fp.sessions = sessions.length;
+      logged.sessions = sessions.length;
       const first = sessions.at(0);
-      if (first?.end) fp.firstSessionMs = first.end - first.start;
+      if (first?.end) logged.firstSessionMs = first.end - first.start;
     }
     const a = this.src.activity;
     if (a && p.name && firstJoined >= a.coverageStart) {
       const act = a.byName.get(p.name.toLowerCase());
       // A minute of slack: the proxy logs the hub connection just before Paper records the first join
-      fp.reachedServer = act?.servers.some(([t, server]) => t >= firstJoined - 60_000 && server !== HUB_SERVER) ?? false;
+      logged.reachedServer = act?.servers.some(([t, server]) => t >= firstJoined - 60_000 && server !== HUB_SERVER) ?? false;
       if (this.generatedAt - firstJoined >= RETURN_WINDOW_MS) {
         const firstDay = startOfDay(firstJoined);
-        fp.returned7d = act?.connects.some((t) => startOfDay(t) > firstDay && t < firstJoined + RETURN_WINDOW_MS) ?? false;
+        logged.returned7d = act?.connects.some((t) => startOfDay(t) > firstDay && t < firstJoined + RETURN_WINDOW_MS) ?? false;
       }
     }
+    Object.assign(fp, logged);
+    if (Object.keys(logged).length > 0) this.fromLogs.set(p.uuid, { firstJoined, logged });
+
+    // Joined before the oldest log still kept: what the logs said while they covered the player
+    const kept = this.src.history?.get(p.uuid);
+    if (kept) {
+      fp.sessions ??= kept.sessions;
+      fp.firstSessionMs ??= kept.firstSessionMs;
+      fp.reachedServer ??= kept.reachedServer;
+      fp.returned7d ??= kept.returned7d;
+    }
     return fp;
+  }
+
+  /** Keep what the current logs say, so it outlives them */
+  recordHistory(history: FlowHistory): void {
+    for (const [uuid, { firstJoined, logged }] of this.fromLogs) history.record(uuid, firstJoined, logged, this.generatedAt);
+  }
+
+  /** The earliest first join for which a log-derived field is known, from the logs or the history */
+  private knownFrom(coverageStart: number | undefined, field: keyof LoggedFields): number | null {
+    const kept = this.src.history?.earliest(field) ?? null;
+    if (coverageStart === undefined) return kept;
+    return kept === null ? coverageStart : Math.min(coverageStart, kept);
   }
 
   private clientVersion(uuid: string): string | undefined {
@@ -249,8 +278,8 @@ export class FlowModel {
         intro: this.src.intro !== null,
         packs: this.src.packs !== null,
         clients: this.src.clients !== null,
-        sessionsFrom: this.src.sessions?.coverageStart ?? null,
-        activityFrom: this.src.activity?.coverageStart ?? null,
+        sessionsFrom: this.knownFrom(this.src.sessions?.coverageStart, 'sessions'),
+        activityFrom: this.knownFrom(this.src.activity?.coverageStart, 'reachedServer'),
       },
       serverVersion: this.src.serverVersion,
       range: { from, to, bucket },
@@ -266,6 +295,28 @@ export class FlowModel {
       signals: this.signals(),
       signalWindow: { from: signalFrom, to: signalTo, baselineFrom: signalFrom - SIGNAL_BASELINE_MS },
       packHealth: this.packHealthRows,
+    };
+  }
+
+  /**
+   * Where players gave up after the intro: new players since `cutoff` who
+   * finished it but never reached another server, at their last hub position.
+   * Null without proxy logs, which say who moved on.
+   */
+  gaveUpPositions(dimension: string, cutoff: number): { x: number; z: number }[] | null {
+    if (!this.src.activity) return null;
+    return this.flowPlayers
+      .filter((p) => p.firstJoined >= cutoff && p.dimension === dimension && p.outcome === 'finished' && p.reachedServer === false)
+      .map((p) => ({ x: p.x, z: p.z }));
+  }
+
+  /** The current signals alone: what an alert watcher needs */
+  signalsReport(): FlowSignalsResponse {
+    const from = this.generatedAt - SIGNAL_WINDOW_MS;
+    return {
+      generatedAt: this.generatedAt,
+      window: { from, to: this.generatedAt, baselineFrom: from - SIGNAL_BASELINE_MS },
+      signals: this.signals(),
     };
   }
 
@@ -312,6 +363,7 @@ export class FlowModel {
 
     if (recent.players < SIGNAL_MIN_PLAYERS || base.players < SIGNAL_MIN_PLAYERS) {
       return [{
+        id: 'not-enough-data',
         level: 'info',
         title: 'Not enough new players to judge',
         detail: `${plural(recent.players, 'new player')} in the last 14 days and ${base.players.toLocaleString('en-US')} in the 8 weeks before; signals need at least ${SIGNAL_MIN_PLAYERS} in each.`,
@@ -334,6 +386,7 @@ export class FlowModel {
         ? ` ${plural(failedPack, 'player')} of the ${notFinished.length.toLocaleString('en-US')} who did not finish had a resource pack that failed to load.`
         : '';
       out.push({
+        id: 'completion',
         level: completionLevel,
         title: `Intro completion dropped to ${pct(recent.finished, recent.players)}%`,
         detail: `${recent.finished.toLocaleString('en-US')} of ${plural(recent.players, 'new player')} finished in the last 14 days, against ${pct(base.finished, base.players)}% in the 8 weeks before.${why}`,
@@ -344,6 +397,7 @@ export class FlowModel {
       const lvl = level(change(k), warn, crit);
       if (lvl) {
         out.push({
+          id: `stuck-${k}`,
           level: lvl,
           title: `${pct(recent[k], recent.players)}% of new players stop at the ${where}`,
           detail: `${recent[k].toLocaleString('en-US')} of ${recent.players.toLocaleString('en-US')} in the last 14 days, against ${pct(base[k], base.players)}% in the 8 weeks before.${k === 'welcome' ? ' The intro only shows players how to move on once their resource pack has loaded.' : ''}`,
@@ -359,6 +413,7 @@ export class FlowModel {
       const failLevel = level((failRecent - failBase) * 100, 10, 25);
       if (failLevel) {
         out.push({
+          id: 'pack-failed',
           level: failLevel,
           title: `Resource pack failed to load for ${Math.round(failRecent * 100)}% of new players`,
           detail: `${recent.packFailed.toLocaleString('en-US')} of ${recent.packKnown.toLocaleString('en-US')} in the last 14 days, against ${Math.round(failBase * 100)}% in the 8 weeks before.`,
@@ -368,6 +423,7 @@ export class FlowModel {
       const declLevel = level((declRecent - declBase) * 100, 10, 25);
       if (declLevel) {
         out.push({
+          id: 'pack-declined',
           level: declLevel,
           title: `${Math.round(declRecent * 100)}% of new players declined the resource pack`,
           detail: `${recent.packDeclined.toLocaleString('en-US')} of ${recent.packKnown.toLocaleString('en-US')} in the last 14 days, against ${Math.round(declBase * 100)}% in the 8 weeks before.`,
@@ -398,6 +454,7 @@ export class FlowModel {
         const known = ps.filter((p) => p.pack).length;
         const failed = ps.filter((p) => p.pack && isFailure(p.pack.result)).length;
         out.push({
+          id: `client-version:${version}`,
           level: share >= 0.25 ? 'critical' : 'warning',
           title: `${Math.round(share * 100)}% of new players join on ${version}, and ${Math.round(rate * 100)}% of them finish the intro`,
           detail: `${ps.length.toLocaleString('en-US')} of ${plural(recent.players, 'new player')} in the last 14 days used ${version}. ${refText}`
@@ -414,6 +471,7 @@ export class FlowModel {
       const name = (r: PackHealthRow) => `${r.variant} ${r.version}`;
       const rates = failing.map((r) => `${name(r)}: ${r.failed.toLocaleString('en-US')} of ${r.players.toLocaleString('en-US')} (${pct(r.failed, r.players)}%)`);
       out.push({
+        id: 'pack-releases',
         level: 'critical',
         title: failing.length === 1
           ? `${name(failing[0])} fails to load for ${pct(failing[0].failed, failing[0].players)}% of players`
@@ -425,6 +483,7 @@ export class FlowModel {
     // Left both rooms without being recorded as finished
     if (recent.other >= 5 && recent.other / recent.players >= 0.03) {
       out.push({
+        id: 'not-recorded',
         level: 'warning',
         title: `${plural(recent.other, 'new player')} left the intro rooms without being recorded as finished`,
         detail: 'They are not on finishedPlayerList.uid and their last position is outside both rooms. Check whether the intro chain still records finishers.',
@@ -441,6 +500,7 @@ export class FlowModel {
       const lvl = level((bRate - rRate) * 100, 10, 25);
       if (lvl) {
         out.push({
+          id: 'not-moved-on',
           level: lvl,
           title: `Only ${Math.round(rRate * 100)}% of players who finished the intro reached another server`,
           detail: `${moved(finishedRecent).toLocaleString('en-US')} of ${finishedRecent.length.toLocaleString('en-US')} in the last 14 days, against ${Math.round(bRate * 100)}% in the 8 weeks before.`,
@@ -458,6 +518,7 @@ export class FlowModel {
       const lvl = level((bRate - rRate) * 100, 10, 25);
       if (lvl) {
         out.push({
+          id: 'returns',
           level: lvl,
           title: `${Math.round(rRate * 100)}% of new players came back within a week`,
           detail: `${back(backRecent).toLocaleString('en-US')} of ${backRecent.length.toLocaleString('en-US')} who first joined 7 to 21 days ago, against ${Math.round(bRate * 100)}% for the 8 weeks before them.`,
@@ -471,6 +532,7 @@ export class FlowModel {
     const volumeChange = perDay(recent, SIGNAL_WINDOW_MS) / perDay(base, baseMs) - 1;
     if (volumeChange <= -0.4) {
       out.push({
+        id: 'volume',
         level: 'warning',
         title: `New players down ${Math.round(-volumeChange * 100)}%`,
         detail: `${perDay(recent, SIGNAL_WINDOW_MS).toFixed(0)} a day in the last 14 days, against ${perDay(base, baseMs).toFixed(0)} a day in the 8 weeks before.`,
@@ -482,6 +544,7 @@ export class FlowModel {
     const retried = stuckSessions.filter((n) => n >= 2).length;
     if (stuckSessions.length >= 10 && retried / stuckSessions.length >= 0.3) {
       out.push({
+        id: 'retries',
         level: 'info',
         title: `${pct(retried, stuckSessions.length)}% of players who did not finish tried again`,
         detail: `${retried.toLocaleString('en-US')} of ${stuckSessions.length.toLocaleString('en-US')} joined the hub two or more times before giving up (median ${median(stuckSessions)} sessions).`,
@@ -490,6 +553,7 @@ export class FlowModel {
 
     if (!out.some((s) => s.level === 'critical' || s.level === 'warning')) {
       out.unshift({
+        id: 'normal',
         level: 'good',
         title: 'Intro flow looks normal',
         detail: `${pct(recent.finished, recent.players)}% of ${plural(recent.players, 'new player')} finished the intro in the last 14 days, against ${pct(base.finished, base.players)}% in the 8 weeks before.`,

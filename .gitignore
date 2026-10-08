@@ -6,5 +6,6 @@ dist/
 test-world/
 .tile-cache/
 .cache/
+data/
 server.log
 screenshots/

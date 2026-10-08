@@ -4,7 +4,7 @@ import { config } from '../config.js';
 import { playerStore } from './player-store.js';
 import { dimensionSlug } from '../../shared/constants.js';
 import { lastSeen } from '../../shared/protocol.js';
-import type { ContourData, HeatmapRenderResponse, PlayerRecord } from '../../shared/protocol.js';
+import type { ContourData, HeatmapRenderResponse } from '../../shared/protocol.js';
 
 /** Chunk size in blocks */
 const CHUNK_SIZE = 16;
@@ -41,7 +41,8 @@ export async function renderHeatmap(
     viewport?: { minX: number; maxX: number; minZ: number; maxZ: number };
     renderBounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
     colorRamp?: 'default' | 'dropout';
-    players?: PlayerRecord[];
+    /** Positions to draw instead of the dimension's players (date filters are then ignored) */
+    players?: { x: number; z: number }[];
     /** No progress logging (periodic refreshes) */
     quiet?: boolean;
   },
@@ -62,20 +63,21 @@ export async function renderHeatmap(
     opts?.id ? filteredRenders.set(id, data) : defaultRenders.set(id, data);
 
   // Get players for this dimension (use pre-filtered list if provided)
-  let players: PlayerRecord[];
+  let players: { x: number; z: number }[];
   if (opts?.players) {
     players = opts.players;
   } else {
-    players = playerStore.getPlayersByDimension(dimension);
+    let records = playerStore.getPlayersByDimension(dimension);
 
     if (opts?.afterDate) {
       const after = opts.afterDate;
-      players = players.filter((p) => lastSeen(p) >= after);
+      records = records.filter((p) => lastSeen(p) >= after);
     }
     if (opts?.beforeDate) {
       const before = opts.beforeDate;
-      players = players.filter((p) => lastSeen(p) <= before);
+      records = records.filter((p) => lastSeen(p) <= before);
     }
+    players = records;
   }
 
   const t0 = performance.now();

@@ -1,5 +1,5 @@
 import type { PlayerRecord, ClusterItem, PlayerItem, ClustersResponse } from '../../shared/protocol.js';
-import { SINGLE_SESSION_TOLERANCE_MS, lastSeen } from '../../shared/protocol.js';
+import { lastSeen } from '../../shared/protocol.js';
 import { introStatus, type IntroData } from './intro-progress.js';
 
 /** Grid cell size in blocks for spatial indexing */
@@ -16,11 +16,6 @@ interface SpatialCell {
 
 function spatialKey(cx: number, cz: number): string {
   return `${cx},${cz}`;
-}
-
-function isSingleSession(p: PlayerRecord): boolean {
-  return !p.lastOnline || !p.firstJoined ||
-    Math.abs(p.lastOnline - p.firstJoined) < SINGLE_SESSION_TOLERANCE_MS;
 }
 
 export class PlayerStore {
@@ -270,11 +265,6 @@ export class PlayerStore {
     }
 
     return { totalInView, items };
-  }
-
-  getDropoutPlayers(dimension: string, cutoffDate: number): PlayerRecord[] {
-    const players = this.byDimension.get(dimension) || [];
-    return players.filter((p) => p.firstJoined && p.firstJoined >= cutoffDate && isSingleSession(p));
   }
 }
 

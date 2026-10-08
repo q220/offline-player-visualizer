@@ -241,13 +241,13 @@ export function setDropoutLegend(maxPerChunk: number, totalPlayers: number): voi
 
       // innerHTML is safe here: data comes from server, not user input
       div.innerHTML = `
-        <div class="legend-title">Dropout Density</div>
+        <div class="legend-title">Gave up after the intro</div>
         <div class="legend-bar" style="background: ${gradientBar};"></div>
         <div class="legend-labels">
           <span>0</span>
           <span>${maxPerChunk} / chunk</span>
         </div>
-        <div class="legend-total">${totalPlayers.toLocaleString()} dropout players</div>
+        <div class="legend-total">${totalPlayers.toLocaleString()} players who finished the intro and never reached another server</div>
       `;
 
       L.DomEvent.disableClickPropagation(div);

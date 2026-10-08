@@ -103,7 +103,7 @@ export function initFilters(info: WorldInfo): void {
           setDropoutHeatmap(apiUrl(data.url), worldInfo);
           setDropoutLegend(data.maxPerChunk, data.totalPlayers);
         } catch (e) {
-          console.error('Failed to load dropout heatmap:', e);
+          console.error('Failed to load the gave-up heatmap:', e);
         } finally {
           toggleDropoutEl.disabled = false;
         }

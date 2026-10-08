@@ -269,7 +269,7 @@ function renderFunnelCard(d: FlowResponse): void {
 
   const notes: string[] = ['Bars are shares of everyone who joined the hub in the range; ticks mark the period before.'];
   if (d.sources.activityFrom !== null && t.activityKnown < t.players) {
-    notes.push(`Server moves come from the proxy logs, which start on ${fmtDay(d.sources.activityFrom)}; ${fmtInt(t.players - t.activityKnown)} players who joined earlier count as not moved on.`);
+    notes.push(`Server moves come from the proxy logs and are known for players who joined since ${fmtDay(d.sources.activityFrom)}; ${fmtInt(t.players - t.activityKnown)} players who joined earlier count as not moved on.`);
   }
   $('funnel-sub').textContent = notes.join(' ');
   if (d.sources.activityFrom !== null) {
@@ -403,7 +403,7 @@ function renderTries(d: FlowResponse): void {
     el.replaceChildren(h('p', { class: 'empty' }, 'No hub logs found.'));
     return;
   }
-  $('tries-sub').textContent = `Hub visits from the server logs, which start on ${fmtDay(d.sources.sessionsFrom)}`;
+  $('tries-sub').textContent = `Hub visits from the server logs, known for players who joined since ${fmtDay(d.sources.sessionsFrom)}`;
   const rows = d.sessions.filter((s) => s.players > 0);
   if (rows.length === 0) {
     el.replaceChildren(h('p', { class: 'empty' }, 'No new players with log coverage in this range.'));

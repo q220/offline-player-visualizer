@@ -12,5 +12,7 @@ export const config = {
   host: process.env.HOST || '127.0.0.1',
   worldPath,
   cacheDir: path.resolve('.cache', worldKey),
+  /** Data that cannot be rebuilt (unlike the caches), e.g. what deleted logs said */
+  dataDir: path.resolve('data', worldKey),
   bounds: { ...DEFAULT_BOUNDS },
 };

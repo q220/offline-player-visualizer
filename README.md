@@ -26,7 +26,7 @@ The default view (`#flow`). It refreshes its data every 15 minutes.
 | Velocity proxy logs | Network connections and server moves (by name) | `logs/` of the proxy two folders up (`PROXY_LOG_DIR`; hub's proxy name `HUB_SERVER_NAME`, default `hub`) |
 | `events.json` | Dated changes drawn on the charts (`{"date": "YYYY-MM-DD", "label": "..."}`) | Working directory (`FLOW_EVENTS_FILE`) |
 
-Log events are cached per rolled log file under `.cache/`. Logs only reach back as far as the servers keep them, so visits and server moves are unknown for players who joined earlier; the page says so where it matters.
+Log events are cached per rolled log file under `.cache/`. Servers delete logs after about three months, so what the logs say about each new player (hub visits, first visit length, reaching another server, coming back within 7 days) is also kept in `data/<world>-<hash>/flow-history.json`, frozen 8 days after the first join. Unlike `.cache/`, `data/` cannot be rebuilt: back it up. Players who joined before the first run with logs still covering them stay unknown; the page says so where it matters.
 
 ## Map features
 
@@ -36,7 +36,7 @@ Log events are cached per rolled log file under `.cache/`. Logs only reach back 
 - **Dimension switching** - Toggle between Overworld, Nether, and End
 - **Date filtering** - Filter players by last login date, re-render heatmap on the fly
 - **Player dots** - Individual player markers appear when zoomed in
-- **Dropout heatmap** - Where players who joined once since a date last stood
+- **Where players gave up after the intro** - A heatmap of the last hub position of new players (since a date) who finished the intro but never reached another server
 - **Incremental indexing** - After the first run only player files saved since the last start are parsed again
 - **World formats** - Reads both the 26.1+ layout (`dimensions/`, `players/data/`) and the older one (`region/`, `DIM-1/`, `playerdata/`)
 

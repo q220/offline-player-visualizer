@@ -8,6 +8,7 @@ import { loadHubSessions } from './hub-sessions.js';
 import { loadProxyActivity } from './proxy-activity.js';
 import { loadClientVersions } from './client-versions.js';
 import { FlowModel, loadFlowEvents } from './flow.js';
+import { FlowHistory, historyFile } from './flow-history.js';
 
 /** The flow model the API serves; replaced whole on every refresh */
 export const liveData: { flow: FlowModel | null } = { flow: null };
@@ -15,6 +16,7 @@ export const liveData: { flow: FlowModel | null } = { flow: null };
 /** The cache is ~90 MB; between restarts it is rewritten at most this often */
 const CACHE_SAVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 let lastCacheSave = 0;
+let history: FlowHistory | null = null;
 
 /**
  * Re-read everything the flow and the map are built from: player files
@@ -52,9 +54,17 @@ export async function refreshData(opts: { initial: boolean; serverVersion: strin
     loadPackStatus(worldPath), loadHubSessions(worldPath), loadProxyActivity(worldPath), loadClientVersions(worldPath),
   ]);
   const events = loadFlowEvents();
-  liveData.flow = new FlowModel({
-    players: indexed.players, intro, packs, sessions, activity, clients, serverVersion: opts.serverVersion, events,
+  history ??= FlowHistory.load();
+  const flow = new FlowModel({
+    players: indexed.players, intro, packs, sessions, activity, clients, history, serverVersion: opts.serverVersion, events,
   });
+  flow.recordHistory(history);
+  try {
+    if (history.save() && opts.initial) console.log(`  Saved flow history (${history.size} players) to ${historyFile}`);
+  } catch (e) {
+    console.warn('  Failed to save flow history:', e);
+  }
+  liveData.flow = flow;
 
   const secs = ((performance.now() - t0) / 1000).toFixed(1);
   const parts = [
@@ -65,6 +75,7 @@ export async function refreshData(opts: { initial: boolean; serverVersion: strin
     sessions ? `hub sessions since ${new Date(sessions.coverageStart).toLocaleDateString('en-CA')}` : 'no hub logs',
     activity ? `proxy activity since ${new Date(activity.coverageStart).toLocaleDateString('en-CA')}` : 'no proxy logs',
     `${events.length} events`,
+    `history of ${history.size} players`,
   ];
   console.log(`${opts.initial ? 'Loaded' : 'Refreshed'}: ${parts.join(', ')} (${secs}s)`);
 }

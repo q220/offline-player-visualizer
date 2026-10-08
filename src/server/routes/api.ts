@@ -239,6 +239,15 @@ export async function registerApiRoutes(
     return liveData.flow.query(from, to);
   });
 
+  // The current signals alone (last 14 days against the 8 weeks before), for alert watchers
+  app.get('/api/flow/signals', async (_req, reply) => {
+    if (!liveData.flow) {
+      reply.code(503);
+      return { error: 'Flow data is still loading' };
+    }
+    return liveData.flow.signalsReport();
+  });
+
   // New players in a range, newest first
   app.get<{
     Querystring: { from?: string; to?: string; outcome?: string; limit?: string; offset?: string };
@@ -256,15 +265,20 @@ export async function registerApiRoutes(
     return liveData.flow.playersPage(from, to, outcome, limit, offset);
   });
 
-  // Dropout heatmap rendering
+  // Where players gave up after the intro: finished it, never reached another server
   app.post<{
     Body: DropoutHeatmapRequest;
   }>('/api/heatmap/dropout', { schema: { body: heatmapBodySchema } }, async (req, reply) => {
     const { dimension, cutoffDate, viewport, renderBounds } = req.body;
     const cutoff = cutoffDate ?? DEFAULT_HUB_DATE;
     const id = `dropout-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const positions = liveData.flow?.gaveUpPositions(dimension, cutoff);
+    if (!positions) {
+      reply.code(503);
+      return { error: 'Needs the proxy logs, which say who reached another server' };
+    }
 
-    console.log(`\nDropout heatmap request: ${dimension}, cutoff=${new Date(cutoff).toISOString().slice(0, 10)}`);
+    console.log(`\nGave-up heatmap request: ${dimension}, joined since ${new Date(cutoff).toISOString().slice(0, 10)}, ${positions.length} players`);
 
     return heatmapOrError(reply, dimension, () =>
       renderHeatmap(dimension, {
@@ -272,7 +286,7 @@ export async function registerApiRoutes(
         viewport,
         renderBounds,
         colorRamp: 'dropout',
-        players: playerStore.getDropoutPlayers(dimension, cutoff),
+        players: positions,
       }));
   });
 }
