@@ -5,10 +5,21 @@ export interface PlayerRecord {
   z: number;
   y: number;
   dimension: string;
+  /** mtime of the player file; also the key for incremental re-indexing */
   lastModified: number;
+  /** Bukkit firstPlayed (epoch ms) */
   firstJoined?: number;
+  /** Bukkit lastPlayed, else Paper LastSeen (epoch ms) */
   lastOnline?: number;
   hasHeadItem: boolean;
+}
+
+/**
+ * When the player was last online. File mtimes are unreliable on their own:
+ * bulk copies give hundreds of thousands of files the same mtime.
+ */
+export function lastSeen(p: PlayerRecord): number {
+  return p.lastOnline ?? p.lastModified;
 }
 
 export interface WorldInfo {
@@ -24,7 +35,7 @@ export interface WorldInfo {
   };
   spawn?: { x: number; z: number };
   /** Per-dimension heatmap density info for the legend */
-  heatmapDensity?: Record<string, { maxPerChunk: number; totalPlayers: number; contoursUrl: string }>;
+  heatmapDensity?: Record<string, HeatmapRenderResponse>;
   /** Bounds that encompass all player positions (may extend beyond region bounds) */
   playerBounds?: {
     minX: number;
@@ -123,4 +134,4 @@ export interface DropoutHeatmapRequest extends HeatmapRenderRequest {
 
 export const DEFAULT_HUB_DATE = new Date('2026-02-16').getTime();
 export const SINGLE_SESSION_TOLERANCE_MS = 3_600_000;
-export const PLAYER_CACHE_VERSION = 2;
+export const PLAYER_CACHE_VERSION = 3;

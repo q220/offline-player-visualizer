@@ -75,7 +75,7 @@ function onDrawStart(e: L.LeafletMouseEvent): void {
   removeRect();
   drawStart = e.latlng;
 
-  areaRect = L.rectangle([drawStart, drawStart], {
+  areaRect = L.rectangle(L.latLngBounds(drawStart, drawStart), {
     color: '#e94560',
     weight: 2,
     dashArray: '6 4',

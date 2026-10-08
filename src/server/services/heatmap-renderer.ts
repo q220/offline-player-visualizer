@@ -1,27 +1,31 @@
-import fs from 'fs';
-import path from 'path';
 import sharp from 'sharp';
+import { LRUCache } from 'lru-cache';
 import { config } from '../config.js';
 import { playerStore } from './player-store.js';
 import { dimensionSlug } from '../../shared/constants.js';
+import { lastSeen } from '../../shared/protocol.js';
+import type { ContourData, HeatmapRenderResponse, PlayerRecord } from '../../shared/protocol.js';
 
 /** Chunk size in blocks */
 const CHUNK_SIZE = 16;
 
-export interface HeatmapResult {
-  url: string;
-  contoursUrl: string;
-  maxPerChunk: number;
-  totalPlayers: number;
+/** Largest render area in chunks (about 45k x 45k blocks) */
+const MAX_HEATMAP_CELLS = 8_000_000;
+
+export type HeatmapResult = HeatmapRenderResponse;
+
+interface StoredHeatmap {
+  png: Buffer;
+  contours: ContourData;
 }
 
-export interface ContourData {
-  levels: ContourLevel[];
-}
+/** Startup renders, one per dimension; never evicted */
+const defaultRenders = new Map<string, StoredHeatmap>();
+/** Filtered / viewport renders; the client only ever shows the latest one */
+const filteredRenders = new LRUCache<string, StoredHeatmap>({ max: 50 });
 
-export interface ContourLevel {
-  value: number;          // players per chunk (16x16 blocks)
-  lines: number[][][];    // polylines: [[x,z], [x,z], ...]
+export function getStoredHeatmap(id: string): StoredHeatmap | undefined {
+  return defaultRenders.get(id) ?? filteredRenders.get(id);
 }
 
 /**
@@ -37,7 +41,7 @@ export async function renderHeatmap(
     viewport?: { minX: number; maxX: number; minZ: number; maxZ: number };
     renderBounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
     colorRamp?: 'default' | 'dropout';
-    players?: import('../../shared/protocol.js').PlayerRecord[];
+    players?: PlayerRecord[];
   },
 ): Promise<HeatmapResult> {
   const { minX, maxX, minZ, maxZ } = opts?.renderBounds || config.bounds;
@@ -45,9 +49,17 @@ export async function renderHeatmap(
   // Chunk-resolution dimensions
   const chunkW = Math.ceil((maxX - minX) / CHUNK_SIZE);
   const chunkH = Math.ceil((maxZ - minZ) / CHUNK_SIZE);
+  if (chunkW * chunkH > MAX_HEATMAP_CELLS) {
+    throw new RangeError(`Render area too large (${chunkW}x${chunkH} chunks)`);
+  }
+
+  // Store under a fixed id for the startup render, so its URL never changes
+  const id = opts?.id ?? `default-${dimensionSlug(dimension).replace(/[^a-z0-9_-]/g, '_')}`;
+  const store = (data: StoredHeatmap) =>
+    opts?.id ? filteredRenders.set(id, data) : defaultRenders.set(id, data);
 
   // Get players for this dimension (use pre-filtered list if provided)
-  let players: import('../../shared/protocol.js').PlayerRecord[];
+  let players: PlayerRecord[];
   if (opts?.players) {
     players = opts.players;
   } else {
@@ -55,11 +67,11 @@ export async function renderHeatmap(
 
     if (opts?.afterDate) {
       const after = opts.afterDate;
-      players = players.filter((p) => p.lastModified >= after);
+      players = players.filter((p) => lastSeen(p) >= after);
     }
     if (opts?.beforeDate) {
       const before = opts.beforeDate;
-      players = players.filter((p) => p.lastModified <= before);
+      players = players.filter((p) => lastSeen(p) <= before);
     }
   }
 
@@ -69,17 +81,15 @@ export async function renderHeatmap(
     `Heatmap ${label} ${dimensionSlug(dimension)}: ${players.length} players, ${chunkW}x${chunkH} chunks (${(chunkW * chunkH / 1000).toFixed(0)}k cells)`,
   );
 
-  const emptyResult: HeatmapResult = {
-    url: '',
-    contoursUrl: '',
-    maxPerChunk: 0,
-    totalPlayers: 0,
+  const emptyResult = async (): Promise<HeatmapResult> => {
+    const w = Math.max(1, chunkW);
+    const h = Math.max(1, chunkH);
+    store({ png: await encodePng(Buffer.alloc(w * h * 4), w, h), contours: { levels: [] } });
+    return { ...heatmapUrls(id), maxPerChunk: 0, totalPlayers: 0 };
   };
 
   if (players.length === 0 || chunkW <= 0 || chunkH <= 0) {
-    const pixels = Buffer.alloc(Math.max(1, chunkW) * Math.max(1, chunkH) * 4);
-    emptyResult.url = await writeHeatmapPng(pixels, Math.max(1, chunkW), Math.max(1, chunkH), dimension, opts?.id);
-    return emptyResult;
+    return emptyResult();
   }
 
   // Build chunk-resolution density grid
@@ -99,9 +109,7 @@ export async function renderHeatmap(
   console.log(`  Density grid: ${inBoundsCount}/${players.length} in bounds (${(performance.now() - t1).toFixed(0)}ms)`);
 
   if (inBoundsCount === 0) {
-    const pixels = Buffer.alloc(chunkW * chunkH * 4);
-    emptyResult.url = await writeHeatmapPng(pixels, chunkW, chunkH, dimension, opts?.id);
-    return emptyResult;
+    return emptyResult();
   }
 
   // Find max density (players per chunk)
@@ -164,9 +172,7 @@ export async function renderHeatmap(
   }
 
   if (maxBlurred === 0) {
-    const pixels = Buffer.alloc(chunkW * chunkH * 4);
-    emptyResult.url = await writeHeatmapPng(pixels, chunkW, chunkH, dimension, opts?.id);
-    return emptyResult;
+    return emptyResult();
   }
 
   // Map to RGBA — flip vertically so row 0 = maxZ (Leaflet imageOverlay
@@ -192,8 +198,8 @@ export async function renderHeatmap(
   console.log(`  Color map: ${coloredPixels} colored pixels (${(performance.now() - t1).toFixed(0)}ms)`);
 
   t1 = performance.now();
-  const url = await writeHeatmapPng(pixels, chunkW, chunkH, dimension, opts?.id);
-  console.log(`  PNG write (${(performance.now() - t1).toFixed(0)}ms)`);
+  const png = await encodePng(pixels, chunkW, chunkH);
+  console.log(`  PNG encode (${(performance.now() - t1).toFixed(0)}ms)`);
 
   // Generate contour lines from blurred raw density
   t1 = performance.now();
@@ -204,14 +210,21 @@ export async function renderHeatmap(
   t1 = performance.now();
   const contourLevels = computeNiceLevels(maxDensity);
   const contours = extractContours(rawBlurred, chunkW, chunkH, contourLevels, minX, minZ);
-  const contoursUrl = await writeContourJson(contours, dimension, opts?.id);
+  store({ png, contours });
   const totalPolylines = contours.levels.reduce((s, l) => s + l.lines.length, 0);
   console.log(`  Contours: ${contourLevels.length} levels, ${totalPolylines} polylines (${(performance.now() - t1).toFixed(0)}ms)`);
 
   const totalMs = (performance.now() - t0).toFixed(0);
   console.log(`  Heatmap complete in ${totalMs}ms`);
 
-  return { url, contoursUrl, maxPerChunk: maxDensity, totalPlayers: inBoundsCount };
+  return { ...heatmapUrls(id), maxPerChunk: maxDensity, totalPlayers: inBoundsCount };
+}
+
+function heatmapUrls(id: string): { url: string; contoursUrl: string } {
+  return {
+    url: `/api/heatmaps/${id}/heatmap.png`,
+    contoursUrl: `/api/heatmaps/${id}/contours.json`,
+  };
 }
 
 // ---- Gaussian blur (3-pass box blur approximation on Float32) ----
@@ -286,19 +299,8 @@ function boxBlurV(scl: Float32Array, tcl: Float32Array, w: number, h: number, r:
 
 // ---- PNG output ----
 
-async function writeHeatmapPng(
-  pixels: Buffer, width: number, height: number,
-  dimension: string, id?: string,
-): Promise<string> {
-  const slug = dimensionSlug(dimension);
-  const outDir = config.staticDir;
-  fs.mkdirSync(outDir, { recursive: true });
-  const filename = id ? `heatmap-filtered-${id}.png` : `heatmap-${slug}.png`;
-  const outPath = path.join(outDir, filename);
-  await sharp(pixels, { raw: { width, height, channels: 4 } })
-    .png()
-    .toFile(outPath);
-  return `/static/${filename}`;
+function encodePng(pixels: Buffer, width: number, height: number): Promise<Buffer> {
+  return sharp(pixels, { raw: { width, height, channels: 4 } }).png().toBuffer();
 }
 
 // ---- Contour generation (marching squares) ----
@@ -515,18 +517,6 @@ function polylineLength(points: [number, number][]): number {
     len += Math.sqrt(dx * dx + dy * dy);
   }
   return len;
-}
-
-async function writeContourJson(
-  data: ContourData, dimension: string, id?: string,
-): Promise<string> {
-  const slug = dimensionSlug(dimension);
-  const outDir = config.staticDir;
-  fs.mkdirSync(outDir, { recursive: true });
-  const filename = id ? `contours-filtered-${id}.json` : `contours-${slug}.json`;
-  const outPath = path.join(outDir, filename);
-  fs.writeFileSync(outPath, JSON.stringify(data));
-  return `/static/${filename}`;
 }
 
 // ---- Color mapping ----

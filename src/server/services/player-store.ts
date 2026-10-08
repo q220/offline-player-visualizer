@@ -1,20 +1,41 @@
 import type { PlayerRecord, ClusterItem, PlayerItem, ClustersResponse, HubMetrics } from '../../shared/protocol.js';
-import { SINGLE_SESSION_TOLERANCE_MS } from '../../shared/protocol.js';
+import { SINGLE_SESSION_TOLERANCE_MS, lastSeen } from '../../shared/protocol.js';
 
 /** Grid cell size in blocks for spatial indexing */
 const SPATIAL_CELL_SIZE = 256;
+
+/** Most records /api/players returns per page */
+const MAX_PAGE_SIZE = 10000;
+
+interface SpatialCell {
+  cx: number;
+  cz: number;
+  players: PlayerRecord[];
+}
 
 function spatialKey(cx: number, cz: number): string {
   return `${cx},${cz}`;
 }
 
+function toPlayerItem(p: PlayerRecord): PlayerItem {
+  return {
+    type: 'player', uuid: p.uuid, name: p.name, x: p.x, z: p.z, y: p.y,
+    firstJoined: p.firstJoined, lastOnline: p.lastOnline, hasHeadItem: p.hasHeadItem,
+  };
+}
+
+function isSingleSession(p: PlayerRecord): boolean {
+  return !p.lastOnline || !p.firstJoined ||
+    Math.abs(p.lastOnline - p.firstJoined) < SINGLE_SESSION_TOLERANCE_MS;
+}
+
 export class PlayerStore {
   private byUuid = new Map<string, PlayerRecord>();
   private byDimension = new Map<string, PlayerRecord[]>();
-  private nameIndex = new Map<string, PlayerRecord>();
+  /** Lower-cased names for search; a list because names are not unique over time */
+  private named: { key: string; player: PlayerRecord }[] = [];
   /** Spatial grid index: dimension → (cellKey → players in that cell) */
-  private spatialGrid = new Map<string, Map<string, PlayerRecord[]>>();
-  private hubMetricsCache = new Map<number, HubMetrics>();
+  private spatialGrid = new Map<string, Map<string, SpatialCell>>();
 
   addAll(players: PlayerRecord[]): void {
     for (const p of players) {
@@ -28,7 +49,7 @@ export class PlayerStore {
       }
 
       if (p.name) {
-        this.nameIndex.set(p.name.toLowerCase(), p);
+        this.named.push({ key: p.name.toLowerCase(), player: p });
       }
 
       // Insert into spatial grid
@@ -42,15 +63,20 @@ export class PlayerStore {
       const key = spatialKey(cx, cz);
       let cell = grid.get(key);
       if (!cell) {
-        cell = [];
+        cell = { cx, cz, players: [] };
         grid.set(key, cell);
       }
-      cell.push(p);
+      cell.players.push(p);
     }
   }
 
   get count(): number {
     return this.byUuid.size;
+  }
+
+  /** Every record, unpaginated */
+  all(): PlayerRecord[] {
+    return Array.from(this.byUuid.values());
   }
 
   getByUuid(uuid: string): PlayerRecord | undefined {
@@ -69,38 +95,44 @@ export class PlayerStore {
     if (opts?.dimension) {
       players = this.byDimension.get(opts.dimension) || [];
     } else {
-      players = Array.from(this.byUuid.values());
+      players = this.all();
     }
 
     if (opts?.after) {
       const after = opts.after;
-      players = players.filter((p) => p.lastModified >= after);
+      players = players.filter((p) => lastSeen(p) >= after);
     }
     if (opts?.before) {
       const before = opts.before;
-      players = players.filter((p) => p.lastModified <= before);
+      players = players.filter((p) => lastSeen(p) <= before);
     }
 
     const total = players.length;
     const offset = opts?.offset || 0;
-    const limit = opts?.limit || 10000;
+    const limit = Math.min(opts?.limit || MAX_PAGE_SIZE, MAX_PAGE_SIZE);
     players = players.slice(offset, offset + limit);
 
     return { players, total };
   }
 
+  /** Exact name matches first, then prefix matches, then substring and UUID-prefix matches */
   search(query: string, limit = 20): PlayerRecord[] {
     const q = query.toLowerCase();
-    const results: PlayerRecord[] = [];
+    const exact: PlayerRecord[] = [];
+    const prefix: PlayerRecord[] = [];
+    const contains: PlayerRecord[] = [];
 
-    for (const [name, player] of this.nameIndex) {
-      if (name.includes(q)) {
-        results.push(player);
-        if (results.length >= limit) break;
+    for (const { key, player } of this.named) {
+      if (key === q) exact.push(player);
+      else if (key.startsWith(q)) {
+        if (prefix.length < limit) prefix.push(player);
+      } else if (contains.length < limit && key.includes(q)) {
+        contains.push(player);
       }
     }
 
-    // Also search by UUID prefix
+    const results = [...exact, ...prefix, ...contains].slice(0, limit);
+
     if (results.length < limit) {
       for (const [uuid, player] of this.byUuid) {
         if (uuid.startsWith(q) && !results.includes(player)) {
@@ -144,19 +176,33 @@ export class PlayerStore {
     const minCZ = Math.floor(opts.minZ / SPATIAL_CELL_SIZE);
     const maxCZ = Math.floor(opts.maxZ / SPATIAL_CELL_SIZE);
 
+    // Walk the viewport's cells, or the occupied cells when the viewport spans more of them
+    const viewportCells = (maxCX - minCX + 1) * (maxCZ - minCZ + 1);
+    const cells: SpatialCell[] = [];
+    if (viewportCells <= grid.size) {
+      for (let cx = minCX; cx <= maxCX; cx++) {
+        for (let cz = minCZ; cz <= maxCZ; cz++) {
+          const cell = grid.get(spatialKey(cx, cz));
+          if (cell) cells.push(cell);
+        }
+      }
+    } else {
+      for (const cell of grid.values()) {
+        if (cell.cx >= minCX && cell.cx <= maxCX && cell.cz >= minCZ && cell.cz <= maxCZ) {
+          cells.push(cell);
+        }
+      }
+    }
+
     // Collect visible players from only the overlapping cells
     const visible: PlayerRecord[] = [];
-    for (let cx = minCX; cx <= maxCX; cx++) {
-      for (let cz = minCZ; cz <= maxCZ; cz++) {
-        const cell = grid.get(spatialKey(cx, cz));
-        if (!cell) continue;
-        for (const p of cell) {
-          if (p.x < opts.minX || p.x > opts.maxX ||
-              p.z < opts.minZ || p.z > opts.maxZ) continue;
-          if (opts.after && p.lastModified < opts.after) continue;
-          if (opts.before && p.lastModified > opts.before) continue;
-          visible.push(p);
-        }
+    for (const cell of cells) {
+      for (const p of cell.players) {
+        if (p.x < opts.minX || p.x > opts.maxX ||
+            p.z < opts.minZ || p.z > opts.maxZ) continue;
+        if (opts.after && lastSeen(p) < opts.after) continue;
+        if (opts.before && lastSeen(p) > opts.before) continue;
+        visible.push(p);
       }
     }
 
@@ -164,14 +210,7 @@ export class PlayerStore {
 
     // At high zoom, return individual players (capped)
     if (opts.zoom >= 2) {
-      const limit = Math.min(visible.length, 2000);
-      const items: PlayerItem[] = [];
-      for (let i = 0; i < limit; i++) {
-        const p = visible[i];
-        items.push({ type: 'player', uuid: p.uuid, name: p.name, x: p.x, z: p.z, y: p.y,
-          firstJoined: p.firstJoined, lastOnline: p.lastOnline, hasHeadItem: p.hasHeadItem });
-      }
-      return { totalInView, items };
+      return { totalInView, items: visible.slice(0, 2000).map(toPlayerItem) };
     }
 
     // At low zoom, grid-cluster
@@ -202,9 +241,7 @@ export class PlayerStore {
     const items: (ClusterItem | PlayerItem)[] = [];
     for (const cell of clusterGrid.values()) {
       if (cell.count === 1) {
-        const p = cell.first;
-        items.push({ type: 'player', uuid: p.uuid, name: p.name, x: p.x, z: p.z, y: p.y,
-          firstJoined: p.firstJoined, lastOnline: p.lastOnline, hasHeadItem: p.hasHeadItem });
+        items.push(toPlayerItem(cell.first));
       } else {
         items.push({
           type: 'cluster',
@@ -221,46 +258,22 @@ export class PlayerStore {
 
   getDropoutPlayers(dimension: string, cutoffDate: number): PlayerRecord[] {
     const players = this.byDimension.get(dimension) || [];
-    return players.filter((p) => {
-      if (!p.firstJoined || p.firstJoined < cutoffDate) return false;
-      const isSingleSession =
-        !p.lastOnline ||
-        Math.abs(p.lastOnline - p.firstJoined) < SINGLE_SESSION_TOLERANCE_MS;
-      return isSingleSession;
-    });
+    return players.filter((p) => p.firstJoined && p.firstJoined >= cutoffDate && isSingleSession(p));
   }
 
   getHubMetrics(since: number): HubMetrics {
-    const cached = this.hubMetricsCache.get(since);
-    if (cached) return cached;
-
     let totalPlayers = 0;
     let withHeadItem = 0;
-    let withoutHeadItem = 0;
     let singleSession = 0;
 
     for (const p of this.byUuid.values()) {
       if (!p.firstJoined || p.firstJoined < since) continue;
       totalPlayers++;
       if (p.hasHeadItem) withHeadItem++;
-      else withoutHeadItem++;
-      const isSingle =
-        !p.lastOnline ||
-        Math.abs(p.lastOnline - p.firstJoined) < SINGLE_SESSION_TOLERANCE_MS;
-      if (isSingle) singleSession++;
+      if (isSingleSession(p)) singleSession++;
     }
 
-    const result: HubMetrics = { since, totalPlayers, withHeadItem, withoutHeadItem, singleSession };
-    this.hubMetricsCache.set(since, result);
-    return result;
-  }
-
-  clear(): void {
-    this.byUuid.clear();
-    this.byDimension.clear();
-    this.nameIndex.clear();
-    this.spatialGrid.clear();
-    this.hubMetricsCache.clear();
+    return { since, totalPlayers, withHeadItem, withoutHeadItem: totalPlayers - withHeadItem, singleSession };
   }
 }
 

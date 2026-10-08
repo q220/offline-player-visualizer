@@ -1,7 +1,6 @@
 import type { WorldInfo } from '../shared/protocol';
-import { dimensionSlug } from '../shared/constants';
 import { apiUrl } from './api';
-import { initMap, setBlockMap, setHeatmap, setHeatmapLegend, loadContours } from './map';
+import { initMap, setBlockMap, showDefaultHeatmap } from './map';
 import { initSearch } from './search';
 import { initFilters } from './filters';
 import { initSidebar } from './sidebar';
@@ -33,19 +32,9 @@ async function init(): Promise<void> {
       : worldInfo.dimensions[0] || 'minecraft:overworld';
     setBlockMap(defaultDim, worldInfo);
 
-    // Load heatmap (pre-rendered on server with default 30-day filter)
+    // Load heatmap, legend and contour lines (pre-rendered on server with default 30-day filter)
     setStatus('heatmap-init', 'Loading heatmap...');
-    const slug = dimensionSlug(defaultDim);
-    setHeatmap(apiUrl(`/static/heatmap-${slug}.png`), worldInfo);
-
-    // 5b. Show heatmap legend and contour lines
-    if (worldInfo.heatmapDensity?.[defaultDim]) {
-      const density = worldInfo.heatmapDensity[defaultDim];
-      setHeatmapLegend(density.maxPerChunk, density.totalPlayers);
-      if (density.contoursUrl) {
-        loadContours(density.contoursUrl);
-      }
-    }
+    showDefaultHeatmap(defaultDim);
     clearStatus('heatmap-init');
 
     // 6. Initialize filters (dimension toggles, date, layers)

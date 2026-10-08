@@ -1,5 +1,6 @@
 import type { WorldInfo, ContourData } from '../shared/protocol';
 import { apiUrl } from './api';
+import { escapeHtml } from './html';
 import { setStatus, clearStatus } from './status';
 
 declare const L: typeof import('leaflet');
@@ -110,7 +111,7 @@ export function setBlockMap(dimension: string, _worldInfo: WorldInfo): void {
     },
   });
 
-  blockMapLayer = new RegionTileLayer({
+  const layer: L.GridLayer = new (RegionTileLayer as unknown as new (options: L.GridLayerOptions) => L.GridLayer)({
     tileSize: 512,
     maxNativeZoom: 0,
     minNativeZoom: 0,
@@ -120,33 +121,34 @@ export function setBlockMap(dimension: string, _worldInfo: WorldInfo): void {
     keepBuffer: 4,
     updateWhenZooming: false,
   }).addTo(map);
+  blockMapLayer = layer;
 
   // Tile loading progress
   let pendingTiles = 0;
   let loadedTiles = 0;
 
-  blockMapLayer.on('loading', () => {
+  layer.on('loading', () => {
     pendingTiles = 0;
     loadedTiles = 0;
     setStatus('tiles', 'Loading map tiles...');
   });
 
-  blockMapLayer.on('tileloadstart', () => {
+  layer.on('tileloadstart', () => {
     pendingTiles++;
     setStatus('tiles', `Loading map tiles (${loadedTiles}/${pendingTiles})...`);
   });
 
-  blockMapLayer.on('tileload', () => {
+  layer.on('tileload', () => {
     loadedTiles++;
     setStatus('tiles', `Loading map tiles (${loadedTiles}/${pendingTiles})...`);
   });
 
-  blockMapLayer.on('tileerror', () => {
+  layer.on('tileerror', () => {
     loadedTiles++;
     setStatus('tiles', `Loading map tiles (${loadedTiles}/${pendingTiles})...`);
   });
 
-  blockMapLayer.on('load', () => {
+  layer.on('load', () => {
     clearStatus('tiles');
   });
 }
@@ -170,6 +172,17 @@ export function setHeatmap(
     opacity: 0.7,
     zIndex: 2,
   }).addTo(map);
+}
+
+/** Show the heatmap the server rendered at startup (last 30 days) for a dimension */
+export function showDefaultHeatmap(dimension: string): void {
+  const density = storedWorldInfo.heatmapDensity?.[dimension];
+  if (!density) return;
+  setHeatmap(apiUrl(density.url), storedWorldInfo);
+  setHeatmapLegend(density.maxPerChunk, density.totalPlayers);
+  if (density.contoursUrl) {
+    loadContours(density.contoursUrl);
+  }
 }
 
 export function setDropoutHeatmap(
@@ -291,10 +304,10 @@ export function addPlayerMarker(
   const dimName = dimension.replace('minecraft:', '').replace('the_', '');
   marker.bindPopup(
     `<div class="player-popup">
-      <div class="popup-name">${name || 'Unknown'}</div>
-      <div class="popup-info">UUID: ${uuid}</div>
+      <div class="popup-name">${escapeHtml(name || 'Unknown')}</div>
+      <div class="popup-info">UUID: ${escapeHtml(uuid)}</div>
       <div class="popup-info">Position: ${Math.round(x)}, ${Math.round(z)}</div>
-      <div class="popup-info">Dimension: ${dimName}</div>
+      <div class="popup-info">Dimension: ${escapeHtml(dimName)}</div>
     </div>`,
   );
 

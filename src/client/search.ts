@@ -1,5 +1,6 @@
 import type { PlayerRecord } from '../shared/protocol';
 import { apiUrl } from './api';
+import { escapeHtml } from './html';
 import { flyTo, addPlayerMarker, clearPlayerMarkers } from './map';
 
 let searchTimeout: ReturnType<typeof setTimeout>;
@@ -56,8 +57,8 @@ function showResults(players: PlayerRecord[]): void {
     const item = document.createElement('div');
     item.className = 'search-result-item';
     item.innerHTML = `
-      <div class="player-name">${p.name || p.uuid}</div>
-      <div class="player-coords">${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)} - ${p.dimension.replace('minecraft:', '')}</div>
+      <div class="player-name">${escapeHtml(p.name || p.uuid)}</div>
+      <div class="player-coords">${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)} - ${escapeHtml(p.dimension.replace('minecraft:', ''))}</div>
     `;
 
     item.addEventListener('click', () => {

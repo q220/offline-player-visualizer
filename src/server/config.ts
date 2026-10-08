@@ -1,21 +1,16 @@
 import path from 'path';
-import os from 'os';
+import crypto from 'crypto';
 import { DEFAULT_BOUNDS } from '../shared/constants.js';
+
+const worldPath = path.resolve(process.argv[2] || './world');
+
+// Caches are kept per world so tiles or players of one world never show up in another
+const worldKey = `${path.basename(worldPath)}-${crypto.createHash('sha1').update(worldPath).digest('hex').slice(0, 8)}`;
 
 export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
-  host: '0.0.0.0',
-  worldPath: process.argv[2] || './world',
-  staticDir: path.resolve('dist/static'),
+  host: process.env.HOST || '127.0.0.1',
+  worldPath,
+  cacheDir: path.resolve('.cache', worldKey),
   bounds: { ...DEFAULT_BOUNDS },
-  heatmap: {
-    blurSigma: 4,
-    opacity: 0.6,
-    width: 1000,
-    height: 1000,
-  },
-  playerIndexing: {
-    batchSize: 500,
-    maxWorkers: Math.min(4, Math.max(1, os.cpus().length - 1)),
-  },
 };

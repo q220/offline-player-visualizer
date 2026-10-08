@@ -1,6 +1,7 @@
 import type { WorldInfo, ClustersResponse } from '../shared/protocol';
 import { DEFAULT_PLAYER_DAYS } from '../shared/protocol';
 import { apiUrl } from './api';
+import { escapeHtml } from './html';
 import { getMap } from './map';
 import { setStatus, clearStatus } from './status';
 
@@ -150,11 +151,10 @@ function renderItems(data: ClustersResponse, zoom: number): void {
         : 'Unknown';
       const introStatus = item.hasHeadItem ? "Didn't interact" : 'Got past intro';
 
-      // innerHTML is safe here: all data comes from server (usercache.json), not user input
       dot.bindPopup(
         `<div class="player-popup">
-          <div class="popup-name">${item.name || 'Unknown'}</div>
-          <div class="popup-info">UUID: ${item.uuid}</div>
+          <div class="popup-name">${escapeHtml(item.name || 'Unknown')}</div>
+          <div class="popup-info">UUID: ${escapeHtml(item.uuid)}</div>
           <div class="popup-info">Pos: ${Math.round(item.x)}, ${Math.round(item.y)}, ${Math.round(item.z)}</div>
           <div class="popup-info">First joined: ${firstJoinedStr}</div>
           <div class="popup-info">Last online: ${lastOnlineStr}</div>
@@ -188,7 +188,7 @@ function renderItems(data: ClustersResponse, zoom: number): void {
       }).setContent(countLabel);
       circle.bindTooltip(tooltip);
 
-      const names = item.names.join(', ');
+      const names = item.names.map(escapeHtml).join(', ');
       const extra = item.count > item.names.length
         ? ` and ${item.count - item.names.length} more`
         : '';

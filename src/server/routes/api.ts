@@ -1,25 +1,72 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { playerStore } from '../services/player-store.js';
-import { renderHeatmap } from '../services/heatmap-renderer.js';
+import { renderHeatmap, getStoredHeatmap } from '../services/heatmap-renderer.js';
 import { renderTile } from '../services/map-renderer.js';
 import { config } from '../config.js';
-import type { WorldInfo, HeatmapRenderRequest, DropoutHeatmapRequest } from '../../shared/protocol.js';
+import type { WorldInfo, HeatmapRenderRequest, DropoutHeatmapRequest, HeatmapRenderResponse } from '../../shared/protocol.js';
 import { DEFAULT_HUB_DATE } from '../../shared/protocol.js';
+
+const boundsSchema = {
+  type: 'object',
+  required: ['minX', 'maxX', 'minZ', 'maxZ'],
+  properties: {
+    minX: { type: 'number' },
+    maxX: { type: 'number' },
+    minZ: { type: 'number' },
+    maxZ: { type: 'number' },
+  },
+} as const;
+
+const heatmapBodySchema = {
+  type: 'object',
+  required: ['dimension'],
+  properties: {
+    dimension: { type: 'string' },
+    afterDate: { type: 'number' },
+    beforeDate: { type: 'number' },
+    cutoffDate: { type: 'number' },
+    viewport: boundsSchema,
+    renderBounds: boundsSchema,
+  },
+} as const;
+
+/** Parse an optional numeric query value; undefined when absent or not a number */
+function optionalInt(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
 
 export async function registerApiRoutes(
   app: FastifyInstance,
   worldInfo: WorldInfo,
 ): Promise<void> {
+  const knownDimensions = new Set(worldInfo.dimensions);
+
+  /** Renders a heatmap, answering 400 when the request is unusable */
+  async function heatmapOrError(
+    reply: FastifyReply,
+    dimension: string,
+    render: () => Promise<HeatmapRenderResponse>,
+  ): Promise<HeatmapRenderResponse | { error: string }> {
+    if (!knownDimensions.has(dimension)) {
+      reply.code(400);
+      return { error: 'Unknown dimension' };
+    }
+    try {
+      return await render();
+    } catch (e) {
+      if (e instanceof RangeError) {
+        reply.code(400);
+        return { error: e.message };
+      }
+      throw e;
+    }
+  }
+
   // World info
   app.get('/api/world-info', async () => {
-    return {
-      ...worldInfo,
-      playerCount: playerStore.count,
-      dimensions:
-        playerStore.getDimensions().length > 0
-          ? playerStore.getDimensions()
-          : worldInfo.dimensions,
-    };
+    return { ...worldInfo, playerCount: playerStore.count };
   });
 
   // List players (paginated)
@@ -35,10 +82,10 @@ export async function registerApiRoutes(
     const { dimension, after, before, limit, offset } = req.query;
     return playerStore.getAll({
       dimension,
-      after: after ? parseInt(after) : undefined,
-      before: before ? parseInt(before) : undefined,
-      limit: limit ? parseInt(limit) : 10000,
-      offset: offset ? parseInt(offset) : 0,
+      after: optionalInt(after),
+      before: optionalInt(before),
+      limit: optionalInt(limit),
+      offset: optionalInt(offset),
     });
   });
 
@@ -50,7 +97,7 @@ export async function registerApiRoutes(
     if (!q || q.length < 1) {
       return { results: [] };
     }
-    const results = playerStore.search(q, limit ? parseInt(limit) : 20);
+    const results = playerStore.search(q, Math.min(optionalInt(limit) ?? 20, 100));
     return { results };
   });
 
@@ -71,16 +118,19 @@ export async function registerApiRoutes(
     Params: { dimension: string; tx: string; ty: string };
   }>('/api/tiles/:dimension/:tx/:ty', async (req, reply) => {
     const { dimension, tx: txStr, ty: tyStr } = req.params;
-    const tx = parseInt(txStr);
-    const ty = parseInt(tyStr.replace('.png', ''));
-
-    if (isNaN(tx) || isNaN(ty)) {
+    if (!/^-?\d+$/.test(txStr) || !/^-?\d+(\.png)?$/.test(tyStr)) {
       reply.code(400);
       return { error: 'Invalid tile coordinates' };
     }
+    const tx = parseInt(txStr, 10);
+    const ty = parseInt(tyStr, 10);
 
     // Resolve full dimension name
     const fullDim = dimension.includes(':') ? dimension : `minecraft:${dimension}`;
+    if (!knownDimensions.has(fullDim)) {
+      reply.code(404);
+      return { error: 'Unknown dimension' };
+    }
 
     try {
       const pngBuffer = await renderTile(config.worldPath, fullDim, tx, ty);
@@ -90,7 +140,8 @@ export async function registerApiRoutes(
       }
 
       reply.header('Content-Type', 'image/png');
-      reply.header('Cache-Control', 'public, max-age=86400');
+      // Tiles are re-rendered when their region is saved, so keep browser caching short
+      reply.header('Cache-Control', 'public, max-age=3600');
       return reply.send(pngBuffer);
     } catch (e: any) {
       console.error(`Tile render error (${dimension} ${tx},${ty}):`, e.message);
@@ -111,24 +162,29 @@ export async function registerApiRoutes(
       after?: string;
       before?: string;
     };
-  }>('/api/players/clusters', async (req) => {
+  }>('/api/players/clusters', async (req, reply) => {
     const { dimension, zoom, minX, maxX, minZ, maxZ, after, before } = req.query;
+    const nums = [zoom, minX, maxX, minZ, maxZ].map((v) => parseFloat(v));
+    if (nums.some((n) => !Number.isFinite(n))) {
+      reply.code(400);
+      return { error: 'zoom, minX, maxX, minZ and maxZ must be numbers' };
+    }
     return playerStore.getClusters({
       dimension,
-      zoom: parseFloat(zoom),
-      minX: parseFloat(minX),
-      maxX: parseFloat(maxX),
-      minZ: parseFloat(minZ),
-      maxZ: parseFloat(maxZ),
-      after: after ? parseInt(after) : undefined,
-      before: before ? parseInt(before) : undefined,
+      zoom: nums[0],
+      minX: nums[1],
+      maxX: nums[2],
+      minZ: nums[3],
+      maxZ: nums[4],
+      after: optionalInt(after),
+      before: optionalInt(before),
     });
   });
 
   // Re-render heatmap with filters
   app.post<{
     Body: HeatmapRenderRequest;
-  }>('/api/heatmap/render', async (req) => {
+  }>('/api/heatmap/render', { schema: { body: heatmapBodySchema } }, async (req, reply) => {
     const { dimension, afterDate, beforeDate, viewport, renderBounds } = req.body;
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const parts = [dimension];
@@ -137,47 +193,58 @@ export async function registerApiRoutes(
     if (viewport) parts.push(`viewport=[${viewport.minX}..${viewport.maxX}, ${viewport.minZ}..${viewport.maxZ}]`);
     if (renderBounds) parts.push(`renderBounds=[${renderBounds.minX}..${renderBounds.maxX}, ${renderBounds.minZ}..${renderBounds.maxZ}]`);
     console.log(`\nHeatmap render request: ${parts.join(', ')}`);
-    const result = await renderHeatmap(dimension, { afterDate, beforeDate, viewport, renderBounds, id });
-    return {
-      url: result.url,
-      contoursUrl: result.contoursUrl,
-      maxPerChunk: result.maxPerChunk,
-      totalPlayers: result.totalPlayers,
-    };
+    return heatmapOrError(reply, dimension, () =>
+      renderHeatmap(dimension, { afterDate, beforeDate, viewport, renderBounds, id }));
+  });
+
+  // Rendered heatmap images and contour lines
+  app.get<{
+    Params: { id: string };
+  }>('/api/heatmaps/:id/heatmap.png', async (req, reply) => {
+    const stored = getStoredHeatmap(req.params.id);
+    if (!stored) {
+      reply.code(404);
+      return { error: 'Heatmap not found (expired)' };
+    }
+    reply.header('Content-Type', 'image/png');
+    return reply.send(stored.png);
+  });
+
+  app.get<{
+    Params: { id: string };
+  }>('/api/heatmaps/:id/contours.json', async (req, reply) => {
+    const stored = getStoredHeatmap(req.params.id);
+    if (!stored) {
+      reply.code(404);
+      return { error: 'Heatmap not found (expired)' };
+    }
+    return stored.contours;
   });
 
   // Hub intro metrics
   app.get<{
     Querystring: { since?: string };
   }>('/api/hub-metrics', async (req) => {
-    const since = req.query.since ? parseInt(req.query.since) : DEFAULT_HUB_DATE;
-    return playerStore.getHubMetrics(since);
+    return playerStore.getHubMetrics(optionalInt(req.query.since) ?? DEFAULT_HUB_DATE);
   });
 
   // Dropout heatmap rendering
   app.post<{
     Body: DropoutHeatmapRequest;
-  }>('/api/heatmap/dropout', async (req) => {
+  }>('/api/heatmap/dropout', { schema: { body: heatmapBodySchema } }, async (req, reply) => {
     const { dimension, cutoffDate, viewport, renderBounds } = req.body;
     const cutoff = cutoffDate ?? DEFAULT_HUB_DATE;
     const id = `dropout-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     console.log(`\nDropout heatmap request: ${dimension}, cutoff=${new Date(cutoff).toISOString().slice(0, 10)}`);
 
-    const dropoutPlayers = playerStore.getDropoutPlayers(dimension, cutoff);
-    const result = await renderHeatmap(dimension, {
-      id,
-      viewport,
-      renderBounds,
-      colorRamp: 'dropout',
-      players: dropoutPlayers,
-    });
-
-    return {
-      url: result.url,
-      contoursUrl: result.contoursUrl,
-      maxPerChunk: result.maxPerChunk,
-      totalPlayers: result.totalPlayers,
-    };
+    return heatmapOrError(reply, dimension, () =>
+      renderHeatmap(dimension, {
+        id,
+        viewport,
+        renderBounds,
+        colorRamp: 'dropout',
+        players: playerStore.getDropoutPlayers(dimension, cutoff),
+      }));
   });
 }

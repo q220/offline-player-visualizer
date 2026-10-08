@@ -1,8 +1,18 @@
 import fs from 'fs';
 import path from 'path';
-import { parse } from 'prismarine-nbt';
+import nbt from 'prismarine-nbt';
 import type { WorldInfo } from '../../shared/protocol.js';
-import { DEFAULT_BOUNDS, DIMENSIONS } from '../../shared/constants.js';
+import { DEFAULT_BOUNDS } from '../../shared/constants.js';
+
+/** Pre-26.1 locations of the vanilla dimensions, relative to the world folder */
+const LEGACY_REGION_DIRS: Record<string, string> = {
+  'minecraft:overworld': 'region',
+  'minecraft:the_nether': path.join('DIM-1', 'region'),
+  'minecraft:the_end': path.join('DIM1', 'region'),
+};
+
+/** A namespace or path segment of a dimension id; rejects '.', '..' and separators */
+const SAFE_SEGMENT = /^[a-z0-9_-][a-z0-9_.-]*$/;
 
 export async function scanWorld(worldPath: string): Promise<WorldInfo> {
   const absPath = path.resolve(worldPath);
@@ -19,16 +29,17 @@ export async function scanWorld(worldPath: string): Promise<WorldInfo> {
   const levelDatPath = path.join(absPath, 'level.dat');
   if (fs.existsSync(levelDatPath)) {
     try {
-      const buffer = fs.readFileSync(levelDatPath);
-      const { parsed } = await parse(buffer);
-      const data = parsed.value.Data?.value as any;
+      const { parsed } = await nbt.parse(fs.readFileSync(levelDatPath));
+      const data = (nbt.simplify(parsed) as any).Data;
       if (data) {
-        name = data.LevelName?.value || name;
-        mcVersion = data.Version?.value?.Name?.value || 'unknown';
-        const spawnX = data.SpawnX?.value;
-        const spawnZ = data.SpawnZ?.value;
-        if (typeof spawnX === 'number' && typeof spawnZ === 'number') {
-          spawn = { x: spawnX, z: spawnZ };
+        name = data.LevelName || name;
+        mcVersion = data.Version?.Name || 'unknown';
+        // 26.1+: Data.spawn.pos = [x, y, z]; before: SpawnX / SpawnZ
+        const pos = data.spawn?.pos;
+        if (Array.isArray(pos) && pos.length === 3) {
+          spawn = { x: pos[0], z: pos[2] };
+        } else if (typeof data.SpawnX === 'number' && typeof data.SpawnZ === 'number') {
+          spawn = { x: data.SpawnX, z: data.SpawnZ };
         }
       }
     } catch (e) {
@@ -36,82 +47,97 @@ export async function scanWorld(worldPath: string): Promise<WorldInfo> {
     }
   }
 
-  // Discover dimensions
-  const dimensions: string[] = [];
+  const dimensions = discoverDimensions(absPath);
 
-  // Check overworld (region folder directly in world)
-  const overworldRegion = path.join(absPath, 'region');
-  if (fs.existsSync(overworldRegion) && hasRegionFiles(overworldRegion)) {
-    dimensions.push('minecraft:overworld');
-  }
-
-  // Check nether
-  const netherRegion = path.join(absPath, 'DIM-1', 'region');
-  if (fs.existsSync(netherRegion) && hasRegionFiles(netherRegion)) {
-    dimensions.push('minecraft:the_nether');
-  }
-
-  // Check end
-  const endRegion = path.join(absPath, 'DIM1', 'region');
-  if (fs.existsSync(endRegion) && hasRegionFiles(endRegion)) {
-    dimensions.push('minecraft:the_end');
-  }
-
-  // Count playerdata files
-  const playerDataDir = path.join(absPath, 'playerdata');
-  let playerCount = 0;
-  if (fs.existsSync(playerDataDir)) {
-    const files = fs.readdirSync(playerDataDir);
-    playerCount = files.filter((f) => f.endsWith('.dat')).length;
-  }
+  const playerDataDir = getPlayerDataDir(absPath);
+  const playerCount = playerDataDir
+    ? fs.readdirSync(playerDataDir).filter((f) => f.endsWith('.dat')).length
+    : 0;
 
   return {
     name,
     mcVersion,
-    dimensions: dimensions.length > 0 ? dimensions : [DIMENSIONS[0]],
+    dimensions: dimensions.length > 0 ? dimensions : ['minecraft:overworld'],
     playerCount,
     bounds: { ...DEFAULT_BOUNDS },
     spawn,
   };
 }
 
-function hasRegionFiles(dir: string): boolean {
+/** Dimensions that have region files, in both the 26.1+ and the legacy layout */
+function discoverDimensions(absPath: string): string[] {
+  const found = new Set<string>();
+
+  // 26.1+ layout (and custom dimensions before it): dimensions/<namespace>/<name>/region
+  const dimensionsRoot = path.join(absPath, 'dimensions');
+  for (const ns of readdirOrEmpty(dimensionsRoot)) {
+    for (const dimName of readdirOrEmpty(path.join(dimensionsRoot, ns))) {
+      if (hasRegionFiles(path.join(dimensionsRoot, ns, dimName, 'region'))) {
+        found.add(`${ns}:${dimName}`);
+      }
+    }
+  }
+
+  for (const [dim, rel] of Object.entries(LEGACY_REGION_DIRS)) {
+    if (hasRegionFiles(path.join(absPath, rel))) found.add(dim);
+  }
+
+  return Array.from(found);
+}
+
+/** Player files moved from playerdata/ to players/data/ in 26.1 */
+export function getPlayerDataDir(worldPath: string): string | null {
+  const absPath = path.resolve(worldPath);
+  for (const rel of [path.join('players', 'data'), 'playerdata']) {
+    const dir = path.join(absPath, rel);
+    if (fs.existsSync(dir)) return dir;
+  }
+  return null;
+}
+
+function readdirOrEmpty(dir: string): string[] {
   try {
-    const files = fs.readdirSync(dir);
-    return files.some((f) => f.endsWith('.mca'));
+    return fs.readdirSync(dir);
   } catch {
-    return false;
+    return [];
   }
 }
 
-export function getRegionDir(worldPath: string, dimension: string): string {
+function hasRegionFiles(dir: string): boolean {
+  return readdirOrEmpty(dir).some((f) => f.endsWith('.mca'));
+}
+
+const regionDirCache = new Map<string, string | null>();
+
+/**
+ * Locate a dimension's region folder, or null if the id is malformed or no
+ * folder exists. Looks at the 26.1+ layout first, then the legacy vanilla
+ * folders, then Paper/Bukkit sibling world folders for custom dimensions.
+ */
+export function getRegionDir(worldPath: string, dimension: string): string | null {
   const absPath = path.resolve(worldPath);
-  switch (dimension) {
-    case 'minecraft:overworld':
-      return path.join(absPath, 'region');
-    case 'minecraft:the_nether':
-      return path.join(absPath, 'DIM-1', 'region');
-    case 'minecraft:the_end':
-      return path.join(absPath, 'DIM1', 'region');
-    default: {
-      const dimName = dimension.replace('minecraft:', '');
-      const parentDir = path.dirname(absPath);
+  const sep = dimension.indexOf(':');
+  const ns = sep === -1 ? 'minecraft' : dimension.slice(0, sep);
+  const dimName = dimension.slice(sep + 1);
+  if (!SAFE_SEGMENT.test(ns) || !SAFE_SEGMENT.test(dimName)) return null;
 
-      // 1. Vanilla custom dimensions: world/dimensions/namespace/name/region/
-      const customPath = path.join(absPath, 'dimensions', 'minecraft', dimName, 'region');
-      if (fs.existsSync(customPath)) return customPath;
+  const key = `${absPath}\0${ns}:${dimName}`;
+  const cached = regionDirCache.get(key);
+  if (cached !== undefined) return cached;
 
-      // 2. Spigot/Paper sibling world directory: ../dimname/region/
-      const siblingPath = path.join(parentDir, dimName, 'region');
-      if (fs.existsSync(siblingPath)) return siblingPath;
-
-      // 3. Bukkit-style: ../worldname_dimname/region/
-      const worldName = path.basename(absPath);
-      const bukkitPath = path.join(parentDir, `${worldName}_${dimName}`, 'region');
-      if (fs.existsSync(bukkitPath)) return bukkitPath;
-
-      // Last resort: return the custom path even if it doesn't exist
-      return customPath;
-    }
+  const candidates = [path.join(absPath, 'dimensions', ns, dimName, 'region')];
+  const legacy = LEGACY_REGION_DIRS[`${ns}:${dimName}`];
+  if (legacy) {
+    candidates.push(path.join(absPath, legacy));
+  } else {
+    const parentDir = path.dirname(absPath);
+    // Paper sibling world directory: ../dimname/region/
+    candidates.push(path.join(parentDir, dimName, 'region'));
+    // Bukkit-style: ../worldname_dimname/region/
+    candidates.push(path.join(parentDir, `${path.basename(absPath)}_${dimName}`, 'region'));
   }
+
+  const dir = candidates.find((c) => fs.existsSync(c)) ?? null;
+  regionDirCache.set(key, dir);
+  return dir;
 }
