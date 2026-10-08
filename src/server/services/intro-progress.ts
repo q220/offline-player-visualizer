@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { IntroStatus, PlayerRecord } from '../../shared/protocol.js';
+import { topLevelSections } from './simple-yaml.js';
 
 /**
  * Hub intro progress from the MCME-Introduction plugin's own files.
@@ -42,7 +43,7 @@ export function loadIntroData(worldPath: string): IntroData | null {
   const dimensions = new Set(['minecraft:overworld']);
   const locationsFile = path.join(dir, 'locations.yml');
   if (fs.existsSync(locationsFile)) {
-    const sections = parseRoomSections(fs.readFileSync(locationsFile, 'utf-8'));
+    const sections = topLevelSections(fs.readFileSync(locationsFile, 'utf-8'));
     welcomeRoom = toBox(sections.firstRoom);
     compatibilityRoom = toBox(sections.secondRoom);
     // Legacy layout: a non-main world is its own dimension, e.g. minecraft:newplayer
@@ -81,20 +82,4 @@ function toBox(section: Record<string, string> | undefined): Box | null {
 function parseVec(value: string | undefined): number[] | null {
   const parts = value?.trim().split(/\s+/).map(Number);
   return parts && parts.length >= 3 && parts.every(Number.isFinite) ? parts : null;
-}
-
-/** The scalar keys directly under each top-level section of locations.yml */
-function parseRoomSections(yaml: string): Record<string, Record<string, string>> {
-  const sections: Record<string, Record<string, string>> = {};
-  let current: Record<string, string> | null = null;
-  for (const line of yaml.split('\n')) {
-    const top = line.match(/^([A-Za-z]\w*):\s*$/);
-    if (top) {
-      current = sections[top[1]] = {};
-      continue;
-    }
-    const entry = line.match(/^ {2}(\w+):\s*(.*?)\s*$/);
-    if (current && entry && entry[2] !== '') current[entry[1]] = entry[2].replace(/^['"]|['"]$/g, '');
-  }
-  return sections;
 }

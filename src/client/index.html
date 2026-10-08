@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Minecraft Player Visualizer</title>
+    <title>Hub Player Flow</title>
     <link
       rel="stylesheet"
       href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -11,10 +11,120 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-name">Hub player flow</span>
+        <span class="brand-world" id="brand-world"></span>
+      </div>
+      <nav class="tabs" aria-label="Views">
+        <a href="#flow" class="tab" data-view="flow">Flow</a>
+        <a href="#map" class="tab" data-view="map">Map</a>
+      </nav>
+      <div class="freshness" id="freshness" aria-live="polite"></div>
+    </header>
+
+    <main id="view-flow" class="view" hidden>
+      <div class="flow">
+        <section class="card signals" aria-labelledby="signals-title">
+          <div class="card-head">
+            <h2 id="signals-title">Signals</h2>
+            <p class="card-sub" id="signals-sub">Last 14 days compared with the 8 weeks before</p>
+          </div>
+          <ul class="signal-list" id="signal-list"></ul>
+        </section>
+
+        <div class="filter-row" role="group" aria-label="Date range">
+          <span class="filter-label">Range</span>
+          <div class="segmented" id="range-buttons">
+            <button type="button" data-days="14">2 weeks</button>
+            <button type="button" data-days="28">4 weeks</button>
+            <button type="button" data-days="84">12 weeks</button>
+            <button type="button" data-days="182">26 weeks</button>
+            <button type="button" data-days="all">All</button>
+          </div>
+          <span class="filter-note" id="range-note"></span>
+        </div>
+
+        <div id="flow-body" class="flow-body">
+          <section class="kpis" id="kpis" aria-label="Key numbers"></section>
+
+          <section class="card" aria-labelledby="funnel-title">
+            <div class="card-head">
+              <h2 id="funnel-title">From joining the hub to coming back</h2>
+              <p class="card-sub" id="funnel-sub"></p>
+            </div>
+            <div id="funnel"></div>
+          </section>
+
+          <section class="card" id="outcome-card" aria-labelledby="outcome-title">
+            <div class="card-head">
+              <h2 id="outcome-title">Where new players end up in the intro</h2>
+              <button type="button" class="link-btn table-toggle" data-chart="outcome">Show table</button>
+            </div>
+            <div class="chart" id="outcome-chart"></div>
+          </section>
+
+          <section class="card" id="pack-card" aria-labelledby="pack-title">
+            <div class="card-head">
+              <h2 id="pack-title">Resource pack failed to load</h2>
+              <button type="button" class="link-btn table-toggle" data-chart="pack">Show table</button>
+            </div>
+            <div class="chart" id="pack-chart"></div>
+          </section>
+
+          <div class="card-grid">
+            <section class="card" aria-labelledby="by-result-title">
+              <div class="card-head">
+                <h2 id="by-result-title">Intro outcome by resource pack result</h2>
+              </div>
+              <div id="by-result"></div>
+            </section>
+            <section class="card" aria-labelledby="tries-title">
+              <div class="card-head">
+                <h2 id="tries-title">Tries before leaving</h2>
+                <p class="card-sub" id="tries-sub"></p>
+              </div>
+              <div id="tries"></div>
+            </section>
+          </div>
+
+          <div class="card-grid two">
+            <section class="card" aria-labelledby="by-pack-title">
+              <div class="card-head">
+                <h2 id="by-pack-title">Packs new players got</h2>
+                <p class="card-sub">Each player's latest pack, in the selected range</p>
+              </div>
+              <div id="by-pack"></div>
+            </section>
+            <section class="card" aria-labelledby="health-title">
+              <div class="card-head">
+                <h2 id="health-title">Pack releases, all players</h2>
+                <p class="card-sub">Every player whose latest pack is the release, not filtered by date</p>
+              </div>
+              <div id="pack-health"></div>
+            </section>
+          </div>
+
+          <section class="card" aria-labelledby="players-title">
+            <div class="card-head">
+              <h2 id="players-title">New players</h2>
+              <div class="segmented small" id="outcome-filter" role="group" aria-label="Filter by outcome">
+                <button type="button" data-outcome="">All</button>
+                <button type="button" data-outcome="welcome">Stopped at welcome</button>
+                <button type="button" data-outcome="compatibility">Stopped at compatibility</button>
+                <button type="button" data-outcome="finished">Finished</button>
+                <button type="button" data-outcome="other">Other</button>
+              </div>
+            </div>
+            <div id="players"></div>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <div id="app" class="view" hidden>
       <div id="sidebar">
         <div class="sidebar-header">
-          <h1>Player Visualizer</h1>
           <div id="world-info" class="info-box">
             <div class="info-item">
               <span class="label">World:</span>
@@ -40,43 +150,6 @@
               placeholder="Search by name or UUID..."
             />
             <div id="search-results" class="search-results"></div>
-          </div>
-        </div>
-
-        <div class="sidebar-section hub-metrics-section">
-          <h2>Hub Intro Metrics</h2>
-          <div class="hub-metrics-date">
-            <label>
-              Since:
-              <input type="date" id="hub-metrics-since" value="2026-02-16" />
-            </label>
-            <button id="hub-metrics-refresh" class="btn btn-secondary">Update</button>
-          </div>
-          <div id="hub-metrics" class="info-box">
-            <div class="info-item">
-              <span class="label">Total players:</span>
-              <span id="hm-total">-</span>
-            </div>
-            <div class="info-item">
-              <span class="label">Finished intro:</span>
-              <span id="hm-intro-finished">-</span>
-            </div>
-            <div class="info-item">
-              <span class="label">Stuck at welcome screen:</span>
-              <span id="hm-intro-welcome">-</span>
-            </div>
-            <div class="info-item">
-              <span class="label">Stuck at compatibility check:</span>
-              <span id="hm-intro-compatibility">-</span>
-            </div>
-            <div class="info-item" id="hm-intro-other-row" hidden>
-              <span class="label">Elsewhere, not finished:</span>
-              <span id="hm-intro-other">-</span>
-            </div>
-            <div class="info-item">
-              <span class="label">Never returned:</span>
-              <span id="hm-single-session">-</span>
-            </div>
           </div>
         </div>
 
@@ -123,6 +196,10 @@
           <label class="checkbox-label">
             <input type="checkbox" id="toggle-dropout-heatmap" />
             Show Dropout Heatmap
+          </label>
+          <label class="inline-date">
+            Dropouts since
+            <input type="date" id="dropout-since" value="2026-02-16" />
           </label>
         </div>
 

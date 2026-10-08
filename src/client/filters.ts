@@ -96,8 +96,7 @@ export function initFilters(info: WorldInfo): void {
     toggleDropoutEl.addEventListener('change', async () => {
       if (toggleDropoutEl.checked) {
         toggleDropoutEl.disabled = true;
-        // Same cutoff as the Hub Intro Metrics "Since" date
-        const sinceInput = document.getElementById('hub-metrics-since') as HTMLInputElement | null;
+        const sinceInput = document.getElementById('dropout-since') as HTMLInputElement | null;
         const cutoffDate = sinceInput?.value ? new Date(sinceInput.value).getTime() : DEFAULT_HUB_DATE;
         try {
           const data = await requestHeatmap('/api/heatmap/dropout', { dimension: currentDimension, cutoffDate });

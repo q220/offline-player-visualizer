@@ -1,0 +1,451 @@
+import fs from 'fs';
+import path from 'path';
+import type {
+  FlowBucket, FlowCounts, FlowEvent, FlowPlayer, FlowResponse, FlowSignal, IntroStatus,
+  PackGroup, PackHealthRow, PackInfo, PackResult, PackResultGroup, PlayerRecord, SessionStats,
+} from '../../shared/protocol.js';
+import { DEFAULT_HUB_DATE } from '../../shared/protocol.js';
+import { introStatus, type IntroData } from './intro-progress.js';
+import type { SessionData } from './hub-sessions.js';
+import type { ProxyActivity } from './proxy-activity.js';
+
+const DAY = 24 * 60 * 60 * 1000;
+const RETURN_WINDOW_MS = 7 * DAY;
+/** The hub's name on the proxy; any other server counts as moving on */
+const HUB_SERVER = process.env.HUB_SERVER_NAME || 'hub';
+
+/** Ranges up to this long are bucketed by day, longer ones by week */
+const DAILY_MAX_MS = 35 * DAY;
+/** Signals compare the last 14 days with the 8 weeks before */
+const SIGNAL_WINDOW_MS = 14 * DAY;
+const SIGNAL_BASELINE_MS = 56 * DAY;
+/** Fewer new players than this in the window and rates are too noisy to judge */
+const SIGNAL_MIN_PLAYERS = 15;
+/** A pack release needs this many players before its failure rate is judged */
+const PACK_MIN_PLAYERS = 20;
+const PACK_FAIL_RATE = 0.3;
+
+const OUTCOMES: IntroStatus[] = ['finished', 'welcome', 'compatibility', 'other'];
+
+export interface FlowSources {
+  players: PlayerRecord[];
+  intro: IntroData | null;
+  packs: Map<string, PackInfo> | null;
+  sessions: SessionData | null;
+  activity: ProxyActivity | null;
+  events: FlowEvent[];
+}
+
+/** Dated changes to mark on the charts: FLOW_EVENTS_FILE, else events.json in the working directory */
+export function loadFlowEvents(): FlowEvent[] {
+  const file = process.env.FLOW_EVENTS_FILE || path.resolve('events.json');
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return (Array.isArray(data) ? data : [])
+      .filter((e) => typeof e?.date === 'string' && /^\d{4}-\d\d-\d\d$/.test(e.date) && typeof e.label === 'string')
+      .map((e) => ({ date: e.date, label: e.label }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  } catch {
+    return [];
+  }
+}
+
+function emptyCounts(): FlowCounts {
+  return {
+    players: 0, finished: 0, welcome: 0, compatibility: 0, other: 0,
+    activityKnown: 0, reachedServer: 0, finishedMovedOn: 0, returnEligible: 0, returned7d: 0,
+    packKnown: 0, packLoaded: 0, packFailed: 0, packDeclined: 0,
+  };
+}
+
+function add(c: FlowCounts, p: FlowPlayer): void {
+  c.players++;
+  c[p.outcome]++;
+  if (p.reachedServer !== undefined) {
+    c.activityKnown++;
+    if (p.reachedServer) {
+      c.reachedServer++;
+      if (p.outcome === 'finished') c.finishedMovedOn++;
+    }
+  }
+  if (p.returned7d !== undefined) {
+    c.returnEligible++;
+    if (p.returned7d) c.returned7d++;
+  }
+  if (p.pack) {
+    c.packKnown++;
+    if (p.pack.result === 'loaded') c.packLoaded++;
+    else if (isFailure(p.pack.result)) c.packFailed++;
+    else if (p.pack.result === 'declined') c.packDeclined++;
+  }
+}
+
+function isFailure(r: PackResult): boolean {
+  return r === 'failed_reload' || r === 'failed_download';
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+function startOfDay(t: number): number {
+  const d = new Date(t);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+function startOfWeek(t: number): number {
+  const d = new Date(startOfDay(t));
+  const sinceMonday = (d.getDay() + 6) % 7;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - sinceMonday).getTime();
+}
+
+function nextBucket(t: number, bucket: 'day' | 'week'): number {
+  const d = new Date(t);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + (bucket === 'day' ? 1 : 7)).getTime();
+}
+
+/** Natural order for release tags: v4.0.5 > v4.0 > v3.9 > v3.5.29 */
+function compareVersions(a: string, b: string): number {
+  const parts = (v: string) => v.replace(/^v/i, '').split(/[.-]/).map((x) => parseInt(x, 10) || 0);
+  const pa = parts(a), pb = parts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa.at(i) ?? 0) - (pb.at(i) ?? 0);
+    if (diff) return diff;
+  }
+  return 0;
+}
+
+const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
+const plural = (n: number, word: string) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`;
+
+export class FlowModel {
+  /** New players since the hub intro opened, newest first */
+  private readonly flowPlayers: FlowPlayer[];
+  private readonly packHealthRows: PackHealthRow[];
+
+  constructor(private readonly src: FlowSources, readonly generatedAt = Date.now()) {
+    this.flowPlayers = src.players
+      .filter((p) => p.firstJoined !== undefined && p.firstJoined >= DEFAULT_HUB_DATE)
+      .map((p) => this.toFlowPlayer(p))
+      .sort((a, b) => b.firstJoined - a.firstJoined);
+    this.packHealthRows = this.buildPackHealth();
+  }
+
+  private toFlowPlayer(p: PlayerRecord): FlowPlayer {
+    const firstJoined = p.firstJoined!;
+    const fp: FlowPlayer = {
+      uuid: p.uuid,
+      name: p.name,
+      firstJoined,
+      lastOnline: p.lastOnline,
+      outcome: this.src.intro ? introStatus(this.src.intro, p) : 'other',
+      pack: this.src.packs?.get(p.uuid),
+      x: p.x,
+      y: p.y,
+      z: p.z,
+      dimension: p.dimension,
+    };
+    const s = this.src.sessions;
+    if (s && firstJoined >= s.coverageStart) {
+      const sessions = s.byUuid.get(p.uuid) ?? [];
+      fp.sessions = sessions.length;
+      const first = sessions.at(0);
+      if (first?.end) fp.firstSessionMs = first.end - first.start;
+    }
+    const a = this.src.activity;
+    if (a && p.name && firstJoined >= a.coverageStart) {
+      const act = a.byName.get(p.name.toLowerCase());
+      // A minute of slack: the proxy logs the hub connection just before Paper records the first join
+      fp.reachedServer = act?.servers.some(([t, server]) => t >= firstJoined - 60_000 && server !== HUB_SERVER) ?? false;
+      if (this.generatedAt - firstJoined >= RETURN_WINDOW_MS) {
+        const firstDay = startOfDay(firstJoined);
+        fp.returned7d = act?.connects.some((t) => startOfDay(t) > firstDay && t < firstJoined + RETURN_WINDOW_MS) ?? false;
+      }
+    }
+    return fp;
+  }
+
+  private inRange(from: number, to: number): FlowPlayer[] {
+    return this.flowPlayers.filter((p) => p.firstJoined >= from && p.firstJoined < to);
+  }
+
+  private counts(players: FlowPlayer[]): FlowCounts {
+    const c = emptyCounts();
+    for (const p of players) add(c, p);
+    return c;
+  }
+
+  query(from: number, to: number): FlowResponse {
+    from = Math.max(from, DEFAULT_HUB_DATE);
+    const players = this.inRange(from, to);
+    const bucket = to - from <= DAILY_MAX_MS ? 'day' : 'week';
+    const bucketStart = bucket === 'day' ? startOfDay : startOfWeek;
+
+    const series: FlowBucket[] = [];
+    for (let t = bucketStart(from); t < to; t = nextBucket(t, bucket)) series.push({ start: t, ...emptyCounts() });
+    const byStart = new Map(series.map((b) => [b.start, b]));
+    for (const p of players) {
+      const b = byStart.get(bucketStart(p.firstJoined));
+      if (b) add(b, p);
+    }
+
+    const prevFrom = from - (to - from);
+    const previous = from > DEFAULT_HUB_DATE ? { from: Math.max(prevFrom, DEFAULT_HUB_DATE), to: from } : null;
+
+    const byResult = new Map<string, PackResultGroup>();
+    const byPack = new Map<string, PackGroup>();
+    for (const p of players) {
+      const result = p.pack?.result ?? 'unknown';
+      let r = byResult.get(result);
+      if (!r) byResult.set(result, (r = { result, ...emptyCounts() }));
+      add(r, p);
+      if (p.pack?.pack) {
+        const key = `${p.pack.pack}\0${p.pack.version}\0${p.pack.variant}`;
+        let g = byPack.get(key);
+        if (!g) byPack.set(key, (g = { pack: p.pack.pack, version: p.pack.version, variant: p.pack.variant, ...emptyCounts() }));
+        add(g, p);
+      }
+    }
+
+    const sessions: SessionStats[] = OUTCOMES.map((outcome) => {
+      const group = players.filter((p) => p.outcome === outcome && p.sessions !== undefined);
+      return {
+        outcome,
+        players: group.length,
+        medianSessions: median(group.map((p) => p.sessions!)),
+        multiSession: group.filter((p) => p.sessions! >= 2).length,
+        medianFirstSessionMs: median(group.flatMap((p) => (p.firstSessionMs !== undefined ? [p.firstSessionMs] : []))),
+      };
+    });
+
+    const fromDate = new Date(from), toDate = new Date(to);
+    const isoDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const signalTo = this.generatedAt;
+    const signalFrom = signalTo - SIGNAL_WINDOW_MS;
+
+    return {
+      generatedAt: this.generatedAt,
+      sources: {
+        intro: this.src.intro !== null,
+        packs: this.src.packs !== null,
+        sessionsFrom: this.src.sessions?.coverageStart ?? null,
+        activityFrom: this.src.activity?.coverageStart ?? null,
+      },
+      range: { from, to, bucket },
+      previous,
+      totals: this.counts(players),
+      previousTotals: previous ? this.counts(this.inRange(previous.from, previous.to)) : null,
+      series,
+      byPackResult: [...byResult.values()].sort((a, b) => b.players - a.players),
+      byPack: [...byPack.values()].sort((a, b) => b.players - a.players),
+      sessions,
+      events: this.src.events.filter((e) => e.date >= isoDay(fromDate) && e.date <= isoDay(toDate)),
+      signals: this.signals(),
+      signalWindow: { from: signalFrom, to: signalTo, baselineFrom: signalFrom - SIGNAL_BASELINE_MS },
+      packHealth: this.packHealthRows,
+    };
+  }
+
+  playersPage(from: number, to: number, outcome: IntroStatus | undefined, limit: number, offset: number) {
+    const all = this.inRange(Math.max(from, DEFAULT_HUB_DATE), to).filter((p) => !outcome || p.outcome === outcome);
+    return { total: all.length, players: all.slice(offset, offset + limit) };
+  }
+
+  private buildPackHealth(): PackHealthRow[] {
+    if (!this.src.packs) return [];
+    const recent = new Set(
+      this.inRange(this.generatedAt - SIGNAL_WINDOW_MS, Infinity)
+        .flatMap((p) => (p.pack?.pack ? [`${p.pack.pack}\0${p.pack.version}\0${p.pack.variant}`] : [])),
+    );
+    const rows = new Map<string, PackHealthRow>();
+    for (const info of this.src.packs.values()) {
+      if (!info.pack || !info.version) continue;
+      const key = `${info.pack}\0${info.version}\0${info.variant}`;
+      let r = rows.get(key);
+      if (!r) {
+        rows.set(key, (r = {
+          pack: info.pack, version: info.version, variant: info.variant,
+          players: 0, loaded: 0, failed: 0, declined: 0, current: recent.has(key),
+        }));
+      }
+      r.players++;
+      if (info.result === 'loaded') r.loaded++;
+      else if (isFailure(info.result)) r.failed++;
+      else if (info.result === 'declined') r.declined++;
+    }
+    return [...rows.values()]
+      .filter((r) => r.players >= 8)
+      .sort((a, b) => a.pack.localeCompare(b.pack) || compareVersions(b.version, a.version) || a.variant.localeCompare(b.variant));
+  }
+
+  /** What changed in the last 14 days against the 8 weeks before */
+  private signals(): FlowSignal[] {
+    const to = this.generatedAt;
+    const from = to - SIGNAL_WINDOW_MS;
+    const recentPlayers = this.inRange(from, to + 1);
+    const recent = this.counts(recentPlayers);
+    const base = this.counts(this.inRange(Math.max(from - SIGNAL_BASELINE_MS, DEFAULT_HUB_DATE), from));
+    const out: FlowSignal[] = [];
+
+    if (recent.players < SIGNAL_MIN_PLAYERS || base.players < SIGNAL_MIN_PLAYERS) {
+      return [{
+        level: 'info',
+        title: 'Not enough new players to judge',
+        detail: `${plural(recent.players, 'new player')} in the last 14 days and ${base.players.toLocaleString('en-US')} in the 8 weeks before; signals need at least ${SIGNAL_MIN_PLAYERS} in each.`,
+      }];
+    }
+
+    const rate = (c: FlowCounts, k: keyof FlowCounts) => c[k] / c.players;
+    /** Signed change in percentage points, recent minus baseline */
+    const change = (k: keyof FlowCounts) => (rate(recent, k) - rate(base, k)) * 100;
+    const level = (pts: number, warn: number, crit: number): FlowSignal['level'] | null =>
+      pts >= crit ? 'critical' : pts >= warn ? 'warning' : null;
+
+    // Intro completion
+    const completionDrop = -change('finished');
+    const completionLevel = level(completionDrop, 10, 25);
+    if (completionLevel) {
+      const notFinished = recentPlayers.filter((p) => p.outcome !== 'finished');
+      const failedPack = notFinished.filter((p) => p.pack && isFailure(p.pack.result)).length;
+      const why = failedPack >= notFinished.length * 0.4
+        ? ` ${plural(failedPack, 'player')} of the ${notFinished.length.toLocaleString('en-US')} who did not finish had a resource pack that failed to load.`
+        : '';
+      out.push({
+        level: completionLevel,
+        title: `Intro completion dropped to ${pct(recent.finished, recent.players)}%`,
+        detail: `${recent.finished.toLocaleString('en-US')} of ${plural(recent.players, 'new player')} finished in the last 14 days, against ${pct(base.finished, base.players)}% in the 8 weeks before.${why}`,
+      });
+    }
+
+    const stuck = (k: 'welcome' | 'compatibility', where: string, warn: number, crit: number) => {
+      const lvl = level(change(k), warn, crit);
+      if (lvl) {
+        out.push({
+          level: lvl,
+          title: `${pct(recent[k], recent.players)}% of new players stop at the ${where}`,
+          detail: `${recent[k].toLocaleString('en-US')} of ${recent.players.toLocaleString('en-US')} in the last 14 days, against ${pct(base[k], base.players)}% in the 8 weeks before.${k === 'welcome' ? ' The welcome room only lets players through once the resource pack has loaded.' : ''}`,
+        });
+      }
+    };
+    stuck('welcome', 'welcome screen', 10, 25);
+    stuck('compatibility', 'compatibility check', 5, 15);
+
+    // Resource pack results of new players
+    if (recent.packKnown >= SIGNAL_MIN_PLAYERS && base.packKnown >= SIGNAL_MIN_PLAYERS) {
+      const failRecent = recent.packFailed / recent.packKnown, failBase = base.packFailed / base.packKnown;
+      const failLevel = level((failRecent - failBase) * 100, 10, 25);
+      if (failLevel) {
+        out.push({
+          level: failLevel,
+          title: `Resource pack failed to load for ${Math.round(failRecent * 100)}% of new players`,
+          detail: `${recent.packFailed.toLocaleString('en-US')} of ${recent.packKnown.toLocaleString('en-US')} in the last 14 days, against ${Math.round(failBase * 100)}% in the 8 weeks before.`,
+        });
+      }
+      const declRecent = recent.packDeclined / recent.packKnown, declBase = base.packDeclined / base.packKnown;
+      const declLevel = level((declRecent - declBase) * 100, 10, 25);
+      if (declLevel) {
+        out.push({
+          level: declLevel,
+          title: `${Math.round(declRecent * 100)}% of new players declined the resource pack`,
+          detail: `${recent.packDeclined.toLocaleString('en-US')} of ${recent.packKnown.toLocaleString('en-US')} in the last 14 days, against ${Math.round(declBase * 100)}% in the 8 weeks before.`,
+        });
+      }
+    }
+
+    // Releases being sent now that fail for many players
+    const failing = this.packHealthRows
+      .filter((r) => r.current && r.players >= PACK_MIN_PLAYERS && r.failed / r.players >= PACK_FAIL_RATE)
+      .sort((a, b) => b.failed / b.players - a.failed / a.players);
+    if (failing.length > 0) {
+      const name = (r: PackHealthRow) => `${r.variant} ${r.version}`;
+      const rates = failing.map((r) => `${name(r)}: ${r.failed.toLocaleString('en-US')} of ${r.players.toLocaleString('en-US')} (${pct(r.failed, r.players)}%)`);
+      out.push({
+        level: 'critical',
+        title: failing.length === 1
+          ? `${name(failing[0])} fails to load for ${pct(failing[0].failed, failing[0].players)}% of players`
+          : `${failing.length} pack releases fail to load for most players`,
+        detail: `Players whose latest pack is the release and who reported a failed load: ${rates.join('; ')}. New players got ${failing.length === 1 ? 'it' : 'these'} in the last 14 days.`,
+      });
+    }
+
+    // Left both rooms without being recorded as finished
+    if (recent.other >= 5 && recent.other / recent.players >= 0.03) {
+      out.push({
+        level: 'warning',
+        title: `${plural(recent.other, 'new player')} left the intro rooms without being recorded as finished`,
+        detail: 'They are not on finishedPlayerList.uid and their last position is outside both rooms. Check whether the intro chain still records finishers.',
+      });
+    }
+
+    // After the intro: moving on to another server
+    const finishedRecent = recentPlayers.filter((p) => p.outcome === 'finished' && p.reachedServer !== undefined);
+    const finishedBase = this.inRange(Math.max(from - SIGNAL_BASELINE_MS, DEFAULT_HUB_DATE), from)
+      .filter((p) => p.outcome === 'finished' && p.reachedServer !== undefined);
+    if (finishedRecent.length >= SIGNAL_MIN_PLAYERS && finishedBase.length >= SIGNAL_MIN_PLAYERS) {
+      const moved = (ps: FlowPlayer[]) => ps.filter((p) => p.reachedServer).length;
+      const rRate = moved(finishedRecent) / finishedRecent.length, bRate = moved(finishedBase) / finishedBase.length;
+      const lvl = level((bRate - rRate) * 100, 10, 25);
+      if (lvl) {
+        out.push({
+          level: lvl,
+          title: `Only ${Math.round(rRate * 100)}% of players who finished the intro reached another server`,
+          detail: `${moved(finishedRecent).toLocaleString('en-US')} of ${finishedRecent.length.toLocaleString('en-US')} in the last 14 days, against ${Math.round(bRate * 100)}% in the 8 weeks before.`,
+        });
+      }
+    }
+
+    // Coming back: players need 7 days to have had the chance, so this compares older cohorts
+    const cohort = (a: number, b: number) => this.inRange(a, b).filter((p) => p.returned7d !== undefined);
+    const backRecent = cohort(to - SIGNAL_WINDOW_MS - RETURN_WINDOW_MS, to - RETURN_WINDOW_MS);
+    const backBase = cohort(Math.max(to - SIGNAL_WINDOW_MS - RETURN_WINDOW_MS - SIGNAL_BASELINE_MS, DEFAULT_HUB_DATE), to - SIGNAL_WINDOW_MS - RETURN_WINDOW_MS);
+    if (backRecent.length >= SIGNAL_MIN_PLAYERS && backBase.length >= SIGNAL_MIN_PLAYERS) {
+      const back = (ps: FlowPlayer[]) => ps.filter((p) => p.returned7d).length;
+      const rRate = back(backRecent) / backRecent.length, bRate = back(backBase) / backBase.length;
+      const lvl = level((bRate - rRate) * 100, 10, 25);
+      if (lvl) {
+        out.push({
+          level: lvl,
+          title: `${Math.round(rRate * 100)}% of new players came back within a week`,
+          detail: `${back(backRecent).toLocaleString('en-US')} of ${backRecent.length.toLocaleString('en-US')} who first joined 7 to 21 days ago, against ${Math.round(bRate * 100)}% for the 8 weeks before them.`,
+        });
+      }
+    }
+
+    // Arrivals per day
+    const perDay = (c: FlowCounts, ms: number) => c.players / (ms / DAY);
+    const baseMs = from - Math.max(from - SIGNAL_BASELINE_MS, DEFAULT_HUB_DATE);
+    const volumeChange = perDay(recent, SIGNAL_WINDOW_MS) / perDay(base, baseMs) - 1;
+    if (volumeChange <= -0.4) {
+      out.push({
+        level: 'warning',
+        title: `New players down ${Math.round(-volumeChange * 100)}%`,
+        detail: `${perDay(recent, SIGNAL_WINDOW_MS).toFixed(0)} a day in the last 14 days, against ${perDay(base, baseMs).toFixed(0)} a day in the 8 weeks before.`,
+      });
+    }
+
+    // How often stuck players retried
+    const stuckSessions = recentPlayers.filter((p) => p.outcome !== 'finished' && p.sessions !== undefined).map((p) => p.sessions!);
+    const retried = stuckSessions.filter((n) => n >= 2).length;
+    if (stuckSessions.length >= 10 && retried / stuckSessions.length >= 0.3) {
+      out.push({
+        level: 'info',
+        title: `${pct(retried, stuckSessions.length)}% of players who did not finish tried again`,
+        detail: `${retried.toLocaleString('en-US')} of ${stuckSessions.length.toLocaleString('en-US')} joined the hub two or more times before giving up (median ${median(stuckSessions)} sessions).`,
+      });
+    }
+
+    if (!out.some((s) => s.level === 'critical' || s.level === 'warning')) {
+      out.unshift({
+        level: 'good',
+        title: 'Intro flow looks normal',
+        detail: `${pct(recent.finished, recent.players)}% of ${plural(recent.players, 'new player')} finished the intro in the last 14 days, against ${pct(base.finished, base.players)}% in the 8 weeks before.`,
+      });
+    }
+
+    const order = { critical: 0, warning: 1, info: 2, good: 3 };
+    return out.sort((a, b) => order[a.level] - order[b.level]);
+  }
+}

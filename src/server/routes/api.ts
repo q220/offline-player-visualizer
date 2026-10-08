@@ -3,7 +3,8 @@ import { playerStore } from '../services/player-store.js';
 import { renderHeatmap, getStoredHeatmap } from '../services/heatmap-renderer.js';
 import { renderTile } from '../services/map-renderer.js';
 import { config } from '../config.js';
-import type { WorldInfo, HeatmapRenderRequest, DropoutHeatmapRequest, HeatmapRenderResponse } from '../../shared/protocol.js';
+import { liveData } from '../services/live-data.js';
+import type { WorldInfo, HeatmapRenderRequest, DropoutHeatmapRequest, HeatmapRenderResponse, IntroStatus } from '../../shared/protocol.js';
 import { DEFAULT_HUB_DATE } from '../../shared/protocol.js';
 
 const boundsSchema = {
@@ -221,11 +222,38 @@ export async function registerApiRoutes(
     return stored.contours;
   });
 
-  // Hub intro metrics
+  // Hub player flow: totals, series and breakdowns for a range, plus the current signals
   app.get<{
-    Querystring: { since?: string };
-  }>('/api/hub-metrics', async (req) => {
-    return playerStore.getHubMetrics(optionalInt(req.query.since) ?? DEFAULT_HUB_DATE);
+    Querystring: { from?: string; to?: string };
+  }>('/api/flow', async (req, reply) => {
+    if (!liveData.flow) {
+      reply.code(503);
+      return { error: 'Flow data is still loading' };
+    }
+    const to = optionalInt(req.query.to) ?? Date.now();
+    const from = optionalInt(req.query.from) ?? to - 28 * 24 * 60 * 60 * 1000;
+    if (from >= to) {
+      reply.code(400);
+      return { error: 'from must be before to' };
+    }
+    return liveData.flow.query(from, to);
+  });
+
+  // New players in a range, newest first
+  app.get<{
+    Querystring: { from?: string; to?: string; outcome?: string; limit?: string; offset?: string };
+  }>('/api/flow/players', async (req, reply) => {
+    if (!liveData.flow) {
+      reply.code(503);
+      return { error: 'Flow data is still loading' };
+    }
+    const outcomes: IntroStatus[] = ['finished', 'welcome', 'compatibility', 'other'];
+    const outcome = outcomes.find((o) => o === req.query.outcome);
+    const to = optionalInt(req.query.to) ?? Date.now();
+    const from = optionalInt(req.query.from) ?? 0;
+    const limit = Math.min(Math.max(optionalInt(req.query.limit) ?? 50, 1), 500);
+    const offset = Math.max(optionalInt(req.query.offset) ?? 0, 0);
+    return liveData.flow.playersPage(from, to, outcome, limit, offset);
   });
 
   // Dropout heatmap rendering

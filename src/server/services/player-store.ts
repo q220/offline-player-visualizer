@@ -1,4 +1,4 @@
-import type { PlayerRecord, ClusterItem, PlayerItem, ClustersResponse, HubMetrics, IntroStatus } from '../../shared/protocol.js';
+import type { PlayerRecord, ClusterItem, PlayerItem, ClustersResponse } from '../../shared/protocol.js';
 import { SINGLE_SESSION_TOLERANCE_MS, lastSeen } from '../../shared/protocol.js';
 import { introStatus, type IntroData } from './intro-progress.js';
 
@@ -42,6 +42,15 @@ export class PlayerStore {
       firstJoined: p.firstJoined, lastOnline: p.lastOnline,
       introStatus: this.intro ? introStatus(this.intro, p) : undefined,
     };
+  }
+
+  /** Swap in a fresh set of records (a refresh), rebuilding every index */
+  replaceAll(players: PlayerRecord[]): void {
+    this.byUuid = new Map();
+    this.byDimension = new Map();
+    this.named = [];
+    this.spatialGrid = new Map();
+    this.addAll(players);
   }
 
   addAll(players: PlayerRecord[]): void {
@@ -266,21 +275,6 @@ export class PlayerStore {
   getDropoutPlayers(dimension: string, cutoffDate: number): PlayerRecord[] {
     const players = this.byDimension.get(dimension) || [];
     return players.filter((p) => p.firstJoined && p.firstJoined >= cutoffDate && isSingleSession(p));
-  }
-
-  getHubMetrics(since: number): HubMetrics {
-    let totalPlayers = 0;
-    let singleSession = 0;
-    const intro: Record<IntroStatus, number> = { finished: 0, welcome: 0, compatibility: 0, other: 0 };
-
-    for (const p of this.byUuid.values()) {
-      if (!p.firstJoined || p.firstJoined < since) continue;
-      totalPlayers++;
-      if (this.intro) intro[introStatus(this.intro, p)]++;
-      if (isSingleSession(p)) singleSession++;
-    }
-
-    return { since, totalPlayers, intro: this.intro ? intro : null, singleSession };
   }
 }
 

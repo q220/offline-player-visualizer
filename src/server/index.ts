@@ -5,10 +5,8 @@ import path from 'path';
 import fs from 'fs';
 import { config } from './config.js';
 import { scanWorld } from './services/world-scanner.js';
-import { indexPlayers } from './services/player-indexer.js';
-import { loadPlayerCache, savePlayerCache, playerCacheFile } from './services/player-cache.js';
 import { playerStore } from './services/player-store.js';
-import { loadIntroData } from './services/intro-progress.js';
+import { refreshData } from './services/live-data.js';
 import { renderHeatmap } from './services/heatmap-renderer.js';
 import { preRenderTiles } from './services/map-renderer.js';
 import { findConnectedRegions, scanRegions, type RegionInfo } from './services/region-loader.js';
@@ -33,40 +31,10 @@ async function main() {
   }
   console.log();
 
-  // 2. Index players, reusing cached records for files that have not changed
-  console.log('Indexing players...');
-  const previous = loadPlayerCache();
-  if (previous.size > 0) console.log(`  ${previous.size} players in cache`);
-  const indexStart = performance.now();
-  const indexed = await indexPlayers(worldPath, previous, (progress) => {
-    process.stdout.write(
-      `\r  Progress: ${progress.processed}/${progress.total} (${progress.percent}%)`,
-    );
-  });
-  process.stdout.write('\n');
-  playerStore.addAll(indexed.players);
-  const indexSecs = ((performance.now() - indexStart) / 1000).toFixed(1);
-  console.log(`  ${playerStore.count} players: ${indexed.parsed} parsed, ${indexed.reused} from cache, ${indexed.failed} unreadable (${indexSecs}s)`);
-
-  if (indexed.parsed > 0 || indexed.players.length !== previous.size) {
-    try {
-      savePlayerCache(indexed.players);
-      console.log(`  Saved player cache to ${playerCacheFile}`);
-    } catch (e) {
-      console.warn('  Failed to save player cache:', e);
-    }
-  }
+  // 2. Players, intro progress, pack results and hub sessions
+  console.log('Loading players and flow data...');
+  await refreshData({ initial: true });
   console.log();
-
-  // Hub intro progress (MCME-Introduction), if its files are next to the world
-  const intro = loadIntroData(worldPath);
-  playerStore.setIntroData(intro);
-  if (intro) {
-    const rooms = [intro.welcomeRoom && 'welcome', intro.compatibilityRoom && 'compatibility'].filter(Boolean);
-    console.log(`Intro progress: ${intro.finished.size} players finished; rooms: ${rooms.join(', ') || 'none found'}\n`);
-  } else {
-    console.log('Intro progress: MCME-Introduction files not found, intro metrics off\n');
-  }
 
   // 3. Collect all dimensions and compute dynamic bounds
   const allDimensions = new Set<string>(worldInfo.dimensions);
@@ -80,16 +48,7 @@ async function main() {
   const dimensionRegions = computeDynamicBounds(worldPath, worldInfo);
 
   // 4. Pre-render heatmaps (with default 30-day filter to match client default)
-  const defaultAfterDate = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
-  worldInfo.heatmapDensity = {};
-  for (const dimension of worldInfo.dimensions) {
-    try {
-      console.log(`Rendering heatmap for ${dimension} (last ${DEFAULT_PLAYER_DAYS} days)...`);
-      worldInfo.heatmapDensity[dimension] = await renderHeatmap(dimension, { afterDate: defaultAfterDate });
-    } catch (e) {
-      console.error(`  Failed to render heatmap for ${dimension}:`, e);
-    }
-  }
+  await renderDefaultHeatmaps(worldInfo, true);
 
   // 5. Start Fastify server
   const app = Fastify({ logger: false });
@@ -158,8 +117,42 @@ async function main() {
 
   // 6. Pre-render block map tiles (ALL regions, not just connected) in the
   // background; tiles requested meanwhile are rendered on demand
-  await preRenderAllTiles(worldPath, worldInfo, dimensionRegions)
-    .catch((e) => console.error('Tile pre-render failed:', e));
+  scheduleRefresh(worldInfo);
+
+  if (process.env.PRERENDER_TILES !== '0') {
+    await preRenderAllTiles(worldPath, worldInfo, dimensionRegions)
+      .catch((e) => console.error('Tile pre-render failed:', e));
+  }
+}
+
+/** Startup heatmap per dimension, last 30 days, under a fixed id */
+async function renderDefaultHeatmaps(worldInfo: WorldInfo, verbose: boolean): Promise<void> {
+  const afterDate = Date.now() - DEFAULT_PLAYER_DAYS * 24 * 60 * 60 * 1000;
+  const density: NonNullable<WorldInfo['heatmapDensity']> = {};
+  for (const dimension of worldInfo.dimensions) {
+    try {
+      if (verbose) console.log(`Rendering heatmap for ${dimension} (last ${DEFAULT_PLAYER_DAYS} days)...`);
+      density[dimension] = await renderHeatmap(dimension, { afterDate, quiet: !verbose });
+    } catch (e) {
+      console.error(`  Failed to render heatmap for ${dimension}:`, e);
+    }
+  }
+  worldInfo.heatmapDensity = density;
+}
+
+/** Re-read the data every REFRESH_MINUTES (default 15), one refresh at a time */
+function scheduleRefresh(worldInfo: WorldInfo): void {
+  const minutes = parseFloat(process.env.REFRESH_MINUTES || '15');
+  if (!(minutes > 0)) return;
+  setTimeout(async () => {
+    try {
+      await refreshData({ initial: false });
+      await renderDefaultHeatmaps(worldInfo, false);
+    } catch (e) {
+      console.error('Refresh failed:', e);
+    }
+    scheduleRefresh(worldInfo);
+  }, minutes * 60 * 1000);
 }
 
 async function preRenderAllTiles(

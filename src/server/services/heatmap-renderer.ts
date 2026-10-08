@@ -42,8 +42,11 @@ export async function renderHeatmap(
     renderBounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
     colorRamp?: 'default' | 'dropout';
     players?: PlayerRecord[];
+    /** No progress logging (periodic refreshes) */
+    quiet?: boolean;
   },
 ): Promise<HeatmapResult> {
+  const log: (...args: unknown[]) => void = opts?.quiet ? () => {} : console.log;
   const { minX, maxX, minZ, maxZ } = opts?.renderBounds || config.bounds;
 
   // Chunk-resolution dimensions
@@ -77,7 +80,7 @@ export async function renderHeatmap(
 
   const t0 = performance.now();
   const label = opts?.id ? `[filtered ${opts.id}]` : '[startup]';
-  console.log(
+  log(
     `Heatmap ${label} ${dimensionSlug(dimension)}: ${players.length} players, ${chunkW}x${chunkH} chunks (${(chunkW * chunkH / 1000).toFixed(0)}k cells)`,
   );
 
@@ -106,7 +109,7 @@ export async function renderHeatmap(
     }
   }
 
-  console.log(`  Density grid: ${inBoundsCount}/${players.length} in bounds (${(performance.now() - t1).toFixed(0)}ms)`);
+  log(`  Density grid: ${inBoundsCount}/${players.length} in bounds (${(performance.now() - t1).toFixed(0)}ms)`);
 
   if (inBoundsCount === 0) {
     return emptyResult();
@@ -119,7 +122,7 @@ export async function renderHeatmap(
     if (density[i] > 0) nonZeroChunks++;
     if (density[i] > maxDensity) maxDensity = density[i];
   }
-  console.log(`  Max density: ${maxDensity}/chunk, ${nonZeroChunks} active chunks`);
+  log(`  Max density: ${maxDensity}/chunk, ${nonZeroChunks} active chunks`);
 
   // Copy raw density for contour extraction (before transforms)
   const rawDensity = new Float32Array(density);
@@ -132,17 +135,17 @@ export async function renderHeatmap(
       density[i] = Math.sqrt(density[i]) / sqrtMax;
     }
   }
-  console.log(`  Sqrt scale (${(performance.now() - t1).toFixed(0)}ms)`);
+  log(`  Sqrt scale (${(performance.now() - t1).toFixed(0)}ms)`);
 
   // Blur — scale with world size, not just density
   // Sparse data needs a wide kernel to create meaningful gradients
   t1 = performance.now();
   const worldDiag = Math.sqrt(chunkW * chunkW + chunkH * chunkH);
   const blurSigma = Math.max(6, Math.min(30, Math.round(worldDiag / 25)));
-  console.log(`  Blur sigma: ${blurSigma} (diagonal ${Math.round(worldDiag)} chunks)...`);
+  log(`  Blur sigma: ${blurSigma} (diagonal ${Math.round(worldDiag)} chunks)...`);
 
   const blurred = gaussianBlurFloat32(density, chunkW, chunkH, blurSigma);
-  console.log(`  Gaussian blur (${(performance.now() - t1).toFixed(0)}ms)`);
+  log(`  Gaussian blur (${(performance.now() - t1).toFixed(0)}ms)`);
 
   // Compute global max first (always needed as a floor for viewport normalization)
   let globalMaxBlurred = 0;
@@ -168,7 +171,7 @@ export async function renderHeatmap(
     // Use viewport max but floor at 15% of global max to prevent cold areas
     // from over-saturating (everything turning red when zoomed into empty space)
     maxBlurred = Math.max(viewportMax, globalMaxBlurred * 0.15);
-    console.log(`  Viewport normalization: chunks [${vpMinCX}..${vpMaxCX}] x [${vpMinCZ}..${vpMaxCZ}], viewportMax=${viewportMax.toFixed(4)}, floor=${(globalMaxBlurred * 0.15).toFixed(4)}, effective=${maxBlurred.toFixed(4)}`);
+    log(`  Viewport normalization: chunks [${vpMinCX}..${vpMaxCX}] x [${vpMinCZ}..${vpMaxCZ}], viewportMax=${viewportMax.toFixed(4)}, floor=${(globalMaxBlurred * 0.15).toFixed(4)}, effective=${maxBlurred.toFixed(4)}`);
   }
 
   if (maxBlurred === 0) {
@@ -195,27 +198,27 @@ export async function renderHeatmap(
     }
   }
 
-  console.log(`  Color map: ${coloredPixels} colored pixels (${(performance.now() - t1).toFixed(0)}ms)`);
+  log(`  Color map: ${coloredPixels} colored pixels (${(performance.now() - t1).toFixed(0)}ms)`);
 
   t1 = performance.now();
   const png = await encodePng(pixels, chunkW, chunkH);
-  console.log(`  PNG encode (${(performance.now() - t1).toFixed(0)}ms)`);
+  log(`  PNG encode (${(performance.now() - t1).toFixed(0)}ms)`);
 
   // Generate contour lines from blurred raw density
   t1 = performance.now();
   const contourSigma = Math.max(3, blurSigma);
   const rawBlurred = gaussianBlurFloat32(rawDensity, chunkW, chunkH, contourSigma);
-  console.log(`  Contour blur (${(performance.now() - t1).toFixed(0)}ms)`);
+  log(`  Contour blur (${(performance.now() - t1).toFixed(0)}ms)`);
 
   t1 = performance.now();
   const contourLevels = computeNiceLevels(maxDensity);
   const contours = extractContours(rawBlurred, chunkW, chunkH, contourLevels, minX, minZ);
   store({ png, contours });
   const totalPolylines = contours.levels.reduce((s, l) => s + l.lines.length, 0);
-  console.log(`  Contours: ${contourLevels.length} levels, ${totalPolylines} polylines (${(performance.now() - t1).toFixed(0)}ms)`);
+  log(`  Contours: ${contourLevels.length} levels, ${totalPolylines} polylines (${(performance.now() - t1).toFixed(0)}ms)`);
 
   const totalMs = (performance.now() - t0).toFixed(0);
-  console.log(`  Heatmap complete in ${totalMs}ms`);
+  log(`  Heatmap complete in ${totalMs}ms`);
 
   return { ...heatmapUrls(id), maxPerChunk: maxDensity, totalPlayers: inBoundsCount };
 }
