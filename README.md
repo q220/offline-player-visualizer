@@ -1,8 +1,33 @@
-# Minecraft Offline Player Visualizer
+# Hub Player Flow (offline player visualizer)
 
-A web tool that reads a Minecraft Java Edition world folder, renders a top-down block map, and visualizes the locations of logged-off players as a heatmap overlay.
+A web tool for finding problems in how new players get through the MCME hub: where they stop in the intro, whether their resource pack loads, whether they reach another server and come back. A second tab shows the hub world as a block map with logged-off players as a heatmap.
 
-## Features
+## Flow page
+
+The default view (`#flow`). It refreshes its data every 15 minutes.
+
+- **Signals** - What changed in the last 14 days against the 8 weeks before: intro completion, players stopping at the welcome screen or the compatibility check, resource pack failures and declines, pack releases that fail for many players, players who finished but did not reach another server, fewer players coming back, fewer new players, and how often stuck players retried
+- **Range** - 2, 4, 12 or 26 weeks, or everything since the hub opened, compared with the period before
+- **Key numbers** - New players, finished the intro, stopped at each room, pack failed to load, came back within 7 days, each with its change and a trend line
+- **Funnel** - Joined the hub, finished the intro, reached another server; came back within 7 days
+- **Charts** - Intro outcome and pack failures per day or week, with dated events marked; each has a table view
+- **Tables** - Intro outcome by pack result, tries before leaving, packs new players got, and failure rates of every pack release
+- **New players** - Newest first, filterable by outcome, with their pack, pack result, hub visits and whether they moved on; "Map" flies to them on the map
+
+### Data sources
+
+| Source | Gives | Location (override) |
+|---|---|---|
+| Player files | First join, last online, position, name | `players/data/` or `playerdata/` in the world |
+| MCME-Introduction | Who finished (`finishedPlayerList.uid`); room boxes (`locations.yml`) | `plugins/MCME-Introduction` next to the world (`INTRO_DIR`) |
+| MCME-Architect database | Each player's latest resource pack and its load result (`architect_rp`) | Credentials from `plugins/MCME-Architect/config.yml` (`ARCHITECT_DB_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_NAME`) |
+| Hub server logs | Hub visits per player | `logs/` next to the world (`HUB_LOG_DIR`) |
+| Velocity proxy logs | Network connections and server moves (by name) | `logs/` of the proxy two folders up (`PROXY_LOG_DIR`; hub's proxy name `HUB_SERVER_NAME`, default `hub`) |
+| `events.json` | Dated changes drawn on the charts (`{"date": "YYYY-MM-DD", "label": "..."}`) | Working directory (`FLOW_EVENTS_FILE`) |
+
+Log events are cached per rolled log file under `.cache/`. Logs only reach back as far as the servers keep them, so visits and server moves are unknown for players who joined earlier; the page says so where it matters.
+
+## Map features
 
 - **Block map rendering** - Top-down view of the world using 300+ Minecraft block colors
 - **Player heatmap** - Density overlay with log-scale normalization and gaussian blur
@@ -10,7 +35,7 @@ A web tool that reads a Minecraft Java Edition world folder, renders a top-down 
 - **Dimension switching** - Toggle between Overworld, Nether, and End
 - **Date filtering** - Filter players by last login date, re-render heatmap on the fly
 - **Player dots** - Individual player markers appear when zoomed in
-- **Hub intro metrics** - New players since a date: finished the intro, stuck at the welcome screen or the compatibility check (from MCME-Introduction's `finishedPlayerList.uid` and room boxes in `locations.yml`; set `INTRO_DIR` if the plugin folder is not next to the world), single-session dropouts and a dropout heatmap
+- **Dropout heatmap** - Where players who joined once since a date last stood
 - **Incremental indexing** - After the first run only player files saved since the last start are parsed again
 - **World formats** - Reads both the 26.1+ layout (`dimensions/`, `players/data/`) and the older one (`region/`, `DIM-1/`, `playerdata/`)
 
@@ -69,6 +94,8 @@ This runs the server (with hot reload via tsx) and the Vite dev server concurren
 
 - **Port**: Set the `PORT` environment variable (default: `3000`)
 - **Host**: Set the `HOST` environment variable (default: `127.0.0.1`; use `0.0.0.0` to listen on all interfaces)
+- **Refresh**: `REFRESH_MINUTES` (default `15`; `0` turns it off)
+- **Tile pre-rendering**: `PRERENDER_TILES=0` skips it (tiles still render on demand)
 - **World bounds**: Computed from the region files connected to spawn, capped at 10000x10000 blocks
 
 ## API
@@ -84,9 +111,10 @@ This runs the server (with hot reload via tsx) and the Vite dev server concurren
 | `POST /api/heatmap/render` | Render a heatmap with date filters, viewport or area |
 | `POST /api/heatmap/dropout` | Render the dropout heatmap (single-session players since `cutoffDate`) |
 | `GET /api/heatmaps/{id}/heatmap.png`, `/api/heatmaps/{id}/contours.json` | A rendered heatmap (the last 50 are kept in memory) |
-| `GET /api/hub-metrics?since=` | Hub intro metrics for players who first joined after `since` |
+| `GET /api/flow?from=&to=` | Flow totals, series, breakdowns, pack health and the current signals |
+| `GET /api/flow/players?from=&to=&outcome=&limit=&offset=` | New players in a range, newest first |
 
 ## Tech Stack
 
-- **Backend**: Fastify, TypeScript, sharp, prismarine-nbt (region files are read directly)
+- **Backend**: Fastify, TypeScript, sharp, prismarine-nbt (region files are read directly), mysql2
 - **Frontend**: Leaflet.js (CRS.Simple), Vite, vanilla TypeScript
