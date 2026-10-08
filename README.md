@@ -6,12 +6,12 @@ A web tool for finding problems in how new players get through the MCME hub: whe
 
 The default view (`#flow`). It refreshes its data every 15 minutes.
 
-- **Signals** - What changed in the last 14 days against the 8 weeks before: intro completion, players stopping at the welcome screen or the compatibility check, resource pack failures and declines, pack releases that fail for many players, players who finished but did not reach another server, fewer players coming back, fewer new players, and how often stuck players retried
+- **Signals** - What changed in the last 14 days against the 8 weeks before: intro completion, players stopping at the welcome screen or the compatibility check, resource pack failures and declines, pack releases that fail for many players, game versions other than the server's that finish the intro far less often, players who finished but did not reach another server, fewer players coming back, fewer new players, and how often stuck players retried
 - **Range** - 2, 4, 12 or 26 weeks, or everything since the hub opened, compared with the period before
 - **Key numbers** - New players, finished the intro, stopped at each room, pack failed to load, came back within 7 days, each with its change and a trend line
 - **Funnel** - Joined the hub, finished the intro, reached another server; came back within 7 days
 - **Charts** - Intro outcome and pack failures per day or week, with dated events marked; each has a table view
-- **Tables** - Intro outcome by pack result, tries before leaving, packs new players got, and failure rates of every pack release
+- **Tables** - Intro outcome by game version and by pack result, tries before leaving, packs new players got, and failure rates of every pack release
 - **New players** - Newest first, filterable by outcome, with their pack, pack result, hub visits and whether they moved on; "Map" flies to them on the map
 
 ### Data sources
@@ -21,6 +21,7 @@ The default view (`#flow`). It refreshes its data every 15 minutes.
 | Player files | First join, last online, position, name | `players/data/` or `playerdata/` in the world |
 | MCME-Introduction | Who finished (`finishedPlayerList.uid`); room boxes (`locations.yml`) | `plugins/MCME-Introduction` next to the world (`INTRO_DIR`) |
 | MCME-Architect database | Each player's latest resource pack and its load result (`architect_rp`) | Credentials from `plugins/MCME-Architect/config.yml` (`ARCHITECT_DB_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_NAME`) |
+| Plan database | Each player's latest game version (`plan_version_protocol`, from Plan's ViaVersion integration) | Credentials from `plugins/Plan/config.yml` (`PLAN_DB_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_NAME`) |
 | Hub server logs | Hub visits per player | `logs/` next to the world (`HUB_LOG_DIR`) |
 | Velocity proxy logs | Network connections and server moves (by name) | `logs/` of the proxy two folders up (`PROXY_LOG_DIR`; hub's proxy name `HUB_SERVER_NAME`, default `hub`) |
 | `events.json` | Dated changes drawn on the charts (`{"date": "YYYY-MM-DD", "label": "..."}`) | Working directory (`FLOW_EVENTS_FILE`) |

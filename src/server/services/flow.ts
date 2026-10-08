@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import type {
-  FlowBucket, FlowCounts, FlowEvent, FlowPlayer, FlowResponse, FlowSignal, IntroStatus,
+  ClientGroup, FlowBucket, FlowCounts, FlowEvent, FlowPlayer, FlowResponse, FlowSignal, IntroStatus,
   PackGroup, PackHealthRow, PackInfo, PackResult, PackResultGroup, PlayerRecord, SessionStats,
 } from '../../shared/protocol.js';
+import { clientVersionName } from '../../shared/constants.js';
 import { DEFAULT_HUB_DATE } from '../../shared/protocol.js';
 import { introStatus, type IntroData } from './intro-progress.js';
 import type { SessionData } from './hub-sessions.js';
@@ -33,6 +34,9 @@ export interface FlowSources {
   packs: Map<string, PackInfo> | null;
   sessions: SessionData | null;
   activity: ProxyActivity | null;
+  /** Client protocol by UUID (Plan) */
+  clients: Map<string, number> | null;
+  serverVersion: string;
   events: FlowEvent[];
 }
 
@@ -143,6 +147,7 @@ export class FlowModel {
       lastOnline: p.lastOnline,
       outcome: this.src.intro ? introStatus(this.src.intro, p) : 'other',
       pack: this.src.packs?.get(p.uuid),
+      clientVersion: this.clientVersion(p.uuid),
       x: p.x,
       y: p.y,
       z: p.z,
@@ -166,6 +171,11 @@ export class FlowModel {
       }
     }
     return fp;
+  }
+
+  private clientVersion(uuid: string): string | undefined {
+    const protocol = this.src.clients?.get(uuid);
+    return protocol === undefined ? undefined : clientVersionName(protocol);
   }
 
   private inRange(from: number, to: number): FlowPlayer[] {
@@ -197,7 +207,14 @@ export class FlowModel {
 
     const byResult = new Map<string, PackResultGroup>();
     const byPack = new Map<string, PackGroup>();
+    const byClient = new Map<string, ClientGroup>();
     for (const p of players) {
+      if (this.src.clients) {
+        const version = p.clientVersion ?? 'Unknown';
+        let cg = byClient.get(version);
+        if (!cg) byClient.set(version, (cg = { version, matchesServer: version === this.src.serverVersion, ...emptyCounts() }));
+        add(cg, p);
+      }
       const result = p.pack?.result ?? 'unknown';
       let r = byResult.get(result);
       if (!r) byResult.set(result, (r = { result, ...emptyCounts() }));
@@ -231,15 +248,18 @@ export class FlowModel {
       sources: {
         intro: this.src.intro !== null,
         packs: this.src.packs !== null,
+        clients: this.src.clients !== null,
         sessionsFrom: this.src.sessions?.coverageStart ?? null,
         activityFrom: this.src.activity?.coverageStart ?? null,
       },
+      serverVersion: this.src.serverVersion,
       range: { from, to, bucket },
       previous,
       totals: this.counts(players),
       previousTotals: previous ? this.counts(this.inRange(previous.from, previous.to)) : null,
       series,
       byPackResult: [...byResult.values()].sort((a, b) => b.players - a.players),
+      byClient: [...byClient.values()].sort((a, b) => b.players - a.players),
       byPack: [...byPack.values()].sort((a, b) => b.players - a.players),
       sessions,
       events: this.src.events.filter((e) => e.date >= isoDay(fromDate) && e.date <= isoDay(toDate)),
@@ -326,7 +346,7 @@ export class FlowModel {
         out.push({
           level: lvl,
           title: `${pct(recent[k], recent.players)}% of new players stop at the ${where}`,
-          detail: `${recent[k].toLocaleString('en-US')} of ${recent.players.toLocaleString('en-US')} in the last 14 days, against ${pct(base[k], base.players)}% in the 8 weeks before.${k === 'welcome' ? ' The welcome room only lets players through once the resource pack has loaded.' : ''}`,
+          detail: `${recent[k].toLocaleString('en-US')} of ${recent.players.toLocaleString('en-US')} in the last 14 days, against ${pct(base[k], base.players)}% in the 8 weeks before.${k === 'welcome' ? ' The intro only shows players how to move on once their resource pack has loaded.' : ''}`,
         });
       }
     };
@@ -351,6 +371,37 @@ export class FlowModel {
           level: declLevel,
           title: `${Math.round(declRecent * 100)}% of new players declined the resource pack`,
           detail: `${recent.packDeclined.toLocaleString('en-US')} of ${recent.packKnown.toLocaleString('en-US')} in the last 14 days, against ${Math.round(declBase * 100)}% in the 8 weeks before.`,
+        });
+      }
+    }
+
+    // Client versions other than the server's that do much worse in the intro
+    if (this.src.clients) {
+      const byVersion = new Map<string, FlowPlayer[]>();
+      for (const p of recentPlayers) {
+        if (!p.clientVersion) continue;
+        let list = byVersion.get(p.clientVersion);
+        if (!list) byVersion.set(p.clientVersion, (list = []));
+        list.push(p);
+      }
+      const finishedShare = (ps: FlowPlayer[]) => ps.filter((p) => p.outcome === 'finished').length / ps.length;
+      const own = byVersion.get(this.src.serverVersion) ?? [];
+      const ref = own.length >= 10 ? finishedShare(own) : base.finished / base.players;
+      const refText = own.length >= 10
+        ? `Players on ${this.src.serverVersion}, the server's version, finished ${Math.round(ref * 100)}%.`
+        : `New players in the 8 weeks before finished ${Math.round(ref * 100)}%.`;
+      for (const [version, ps] of [...byVersion].sort((a, b) => b[1].length - a[1].length)) {
+        if (version === this.src.serverVersion || ps.length < SIGNAL_MIN_PLAYERS) continue;
+        const share = ps.length / recent.players;
+        const rate = finishedShare(ps);
+        if (share < 0.1 || (ref - rate) * 100 < 25) continue;
+        const known = ps.filter((p) => p.pack).length;
+        const failed = ps.filter((p) => p.pack && isFailure(p.pack.result)).length;
+        out.push({
+          level: share >= 0.25 ? 'critical' : 'warning',
+          title: `${Math.round(share * 100)}% of new players join on ${version}, and ${Math.round(rate * 100)}% of them finish the intro`,
+          detail: `${ps.length.toLocaleString('en-US')} of ${plural(recent.players, 'new player')} in the last 14 days used ${version}. ${refText}`
+            + (known > 0 && failed / known >= 0.5 ? ` The resource pack failed to load for ${failed.toLocaleString('en-US')} of their ${known.toLocaleString('en-US')}.` : ''),
         });
       }
     }

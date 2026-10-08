@@ -6,6 +6,7 @@ import { loadIntroData } from './intro-progress.js';
 import { loadPackStatus } from './pack-status.js';
 import { loadHubSessions } from './hub-sessions.js';
 import { loadProxyActivity } from './proxy-activity.js';
+import { loadClientVersions } from './client-versions.js';
 import { FlowModel, loadFlowEvents } from './flow.js';
 
 /** The flow model the API serves; replaced whole on every refresh */
@@ -19,7 +20,7 @@ let lastCacheSave = 0;
  * Re-read everything the flow and the map are built from: player files
  * (incrementally), intro progress, pack results and hub sessions.
  */
-export async function refreshData(opts: { initial: boolean }): Promise<void> {
+export async function refreshData(opts: { initial: boolean; serverVersion: string }): Promise<void> {
   const worldPath = config.worldPath;
   const t0 = performance.now();
 
@@ -47,17 +48,20 @@ export async function refreshData(opts: { initial: boolean }): Promise<void> {
 
   const intro = loadIntroData(worldPath);
   playerStore.setIntroData(intro);
-  const [packs, sessions, activity] = await Promise.all([
-    loadPackStatus(worldPath), loadHubSessions(worldPath), loadProxyActivity(worldPath),
+  const [packs, sessions, activity, clients] = await Promise.all([
+    loadPackStatus(worldPath), loadHubSessions(worldPath), loadProxyActivity(worldPath), loadClientVersions(worldPath),
   ]);
   const events = loadFlowEvents();
-  liveData.flow = new FlowModel({ players: indexed.players, intro, packs, sessions, activity, events });
+  liveData.flow = new FlowModel({
+    players: indexed.players, intro, packs, sessions, activity, clients, serverVersion: opts.serverVersion, events,
+  });
 
   const secs = ((performance.now() - t0) / 1000).toFixed(1);
   const parts = [
     `${playerStore.count} players (${indexed.parsed} parsed, ${indexed.failed} unreadable)`,
     intro ? `${intro.finished.size} intro finishers` : 'no intro data',
     packs ? `${packs.size} pack records` : 'no pack data',
+    clients ? `${clients.size} client versions` : 'no client versions',
     sessions ? `hub sessions since ${new Date(sessions.coverageStart).toLocaleDateString('en-CA')}` : 'no hub logs',
     activity ? `proxy activity since ${new Date(activity.coverageStart).toLocaleDateString('en-CA')}` : 'no proxy logs',
     `${events.length} events`,

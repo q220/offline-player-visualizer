@@ -33,7 +33,7 @@ async function main() {
 
   // 2. Players, intro progress, pack results and hub sessions
   console.log('Loading players and flow data...');
-  await refreshData({ initial: true });
+  await refreshData({ initial: true, serverVersion: worldInfo.mcVersion });
   console.log();
 
   // 3. Collect all dimensions and compute dynamic bounds
@@ -146,7 +146,7 @@ function scheduleRefresh(worldInfo: WorldInfo): void {
   if (!(minutes > 0)) return;
   setTimeout(async () => {
     try {
-      await refreshData({ initial: false });
+      await refreshData({ initial: false, serverVersion: worldInfo.mcVersion });
       await renderDefaultHeatmaps(worldInfo, false);
     } catch (e) {
       console.error('Refresh failed:', e);

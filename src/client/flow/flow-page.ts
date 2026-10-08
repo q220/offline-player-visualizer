@@ -149,6 +149,7 @@ function render(): void {
   renderKpis(data);
   renderFunnelCard(data);
   renderCharts();
+  renderByClient(data);
   renderByResult(data);
   renderTries(data);
   renderByPack(data);
@@ -363,7 +364,36 @@ function renderByResult(d: FlowResponse): void {
       RESULT_LABEL[g.result], fmtInt(g.players), meter(g.finished, g.players, 'var(--series-1)'),
       fmtInt(g.welcome), fmtInt(g.compatibility),
     ])),
-  h('p', { class: 'table-note' }, 'The welcome screen only lets players through once their resource pack has loaded.'));
+  h('p', { class: 'table-note' }, 'The intro only shows players how to move on once their resource pack has loaded.'));
+}
+
+function renderByClient(d: FlowResponse): void {
+  const el = $('by-client');
+  if (!d.sources.clients) {
+    $('by-client-sub').textContent = '';
+    el.replaceChildren(h('p', { class: 'empty' }, "Client versions are unavailable: Plan's database could not be reached."));
+    return;
+  }
+  $('by-client-sub').textContent = `Each player's latest game version, from Plan. The intro's second room only lets players on ${d.serverVersion}, the server's version, through on its own.`;
+  if (d.byClient.length === 0) {
+    el.replaceChildren(h('p', { class: 'empty' }, 'No new players in this range.'));
+    return;
+  }
+  const total = d.totals.players;
+  el.replaceChildren(table(
+    [
+      { label: 'Game version' }, { label: 'Players', num: true }, { label: 'Share', num: true },
+      { label: 'Finished the intro' }, { label: 'Stopped at welcome', num: true }, { label: 'Stopped at compatibility', num: true },
+      { label: 'Pack failed to load' },
+    ],
+    d.byClient.map((g) => [
+      h('span', { class: 'version-cell' }, g.version, g.matchesServer ? h('span', { class: 'tag' }, 'current server version') : null),
+      fmtInt(g.players), fmtPct(g.players, total),
+      meter(g.finished, g.players, 'var(--series-1)'),
+      fmtInt(g.welcome), fmtInt(g.compatibility),
+      g.packKnown > 0 ? meter(g.packFailed, g.packKnown, 'var(--series-7)') : '–',
+    ])),
+  h('p', { class: 'table-note' }, 'Pack failed to load is a share of the players in that row with a pack record.'));
 }
 
 function renderTries(d: FlowResponse): void {
@@ -466,6 +496,7 @@ function renderPlayers(): void {
       h('span', { class: 'player-cell', title: p.uuid }, p.name ?? p.uuid.slice(0, 8)),
       fmtDateTime(p.firstJoined),
       outcomeBadge(p.outcome),
+      p.clientVersion ?? '–',
       p.pack?.pack ? `${p.pack.variant} ${p.pack.version}` : '–',
       p.pack ? RESULT_LABEL[p.pack.result] : '–',
       p.sessions === undefined ? '–' : String(p.sessions),
@@ -479,7 +510,7 @@ function renderPlayers(): void {
   more?.addEventListener('click', () => loadPlayers(false));
   el.replaceChildren(
     table([
-      { label: 'Player' }, { label: 'First joined' }, { label: 'Intro' }, { label: 'Latest pack' },
+      { label: 'Player' }, { label: 'First joined' }, { label: 'Intro' }, { label: 'Game version' }, { label: 'Latest pack' },
       { label: 'Pack result' }, { label: 'Hub visits', num: true }, { label: 'Reached a server' }, { label: '' },
     ], rows),
     h('p', { class: 'table-note' }, `${fmtInt(playersShown.length)} of ${fmtInt(playersTotal)} new players, newest first.`));

@@ -191,6 +191,8 @@ export interface FlowPlayer {
   reachedServer?: boolean;
   /** Connected again on a later day within 7 days; absent when unknown or too recent */
   returned7d?: boolean;
+  /** Game version of the client's latest join (from Plan); absent when unknown */
+  clientVersion?: string;
   x: number;
   y: number;
   z: number;
@@ -215,6 +217,13 @@ export interface PackGroup extends FlowCounts {
   pack: string;
   version: string;
   variant: string;
+}
+
+export interface ClientGroup extends FlowCounts {
+  /** ViaVersion's name for the client protocol, or 'Unknown' */
+  version: string;
+  /** The server's own version: intro room 2 only lets these through on its own */
+  matchesServer: boolean;
 }
 
 export interface PackResultGroup extends FlowCounts {
@@ -246,13 +255,16 @@ export interface SessionStats {
 
 export interface FlowResponse {
   generatedAt: number;
-  sources: { intro: boolean; packs: boolean; sessionsFrom: number | null; activityFrom: number | null };
+  sources: { intro: boolean; packs: boolean; clients: boolean; sessionsFrom: number | null; activityFrom: number | null };
+  /** The hub's Minecraft version */
+  serverVersion: string;
   range: { from: number; to: number; bucket: 'day' | 'week' };
   previous: { from: number; to: number } | null;
   totals: FlowCounts;
   previousTotals: FlowCounts | null;
   series: FlowBucket[];
   byPackResult: PackResultGroup[];
+  byClient: ClientGroup[];
   byPack: PackGroup[];
   sessions: SessionStats[];
   events: FlowEvent[];

@@ -1391,6 +1391,20 @@ body {
   border-radius: 50%;
 }
 
+.version-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag {
+  padding: 1px 6px;
+  border: 1px solid var(--axis);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 .fail-cell {
   display: inline-flex;
   align-items: center;
