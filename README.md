@@ -6,7 +6,9 @@ A web tool for finding problems in how new players get through the MCME hub: whe
 
 The default view (`#flow`). It refreshes its data every 15 minutes.
 
-- **Signals** - What changed in the last 14 days against the 8 weeks before: intro completion, players stopping at the welcome screen or the compatibility check, resource pack failures and declines, pack releases that fail for many players, game versions other than the server's that finish the intro far less often, players who finished but did not reach another server, fewer players coming back, fewer new players, and how often stuck players retried
+- **Signals** - What changed in the last 14 days against the 8 weeks before: intro completion, players stopping at the welcome screen or the compatibility check, resource pack failures and declines, pack releases that fail for many of the window's new players, game versions other than the server's that finish the intro far less often, players who finished but did not reach another server, fewer players coming back, fewer new players, and how often stuck players retried. Plus the fast check below: a game version whose pack failed for new players in the last 24 hours (`pack-24h:<version>`), a new release that fails for a game version (`release:…`), and first results of new releases (`release-new:…`, not alerted). Critical signals reach staff through the admin dashboard's alerts (dashboard ADR-047)
+- **Resource packs in the last 24 hours** - New players by game version: pack loaded, failed, declined, finished the intro, and which releases they got; whatever range is selected. A game version is failing when at least 8 of its players tried the pack and 60% or more of them failed. Below it, releases first seen in the last 7 days, by game version, for every player whose latest pack they are
+- **Before and after each event** - For every marker in `events.json`: new players a day, finished the intro, pack failed, reached another server and came back within 7 days, in the 7 days before against the 7 days after
 - **Range** - 2, 4, 12 or 26 weeks, or everything since the hub opened, compared with the period before
 - **Key numbers** - New players, finished the intro, stopped at each room, pack failed to load, came back within 7 days, each with its change and a trend line
 - **Funnel** - Joined the hub, finished the intro, reached another server; came back within 7 days
@@ -26,7 +28,7 @@ The default view (`#flow`). It refreshes its data every 15 minutes.
 | Velocity proxy logs | Network connections and server moves (by name) | `logs/` of the proxy two folders up (`PROXY_LOG_DIR`; hub's proxy name `HUB_SERVER_NAME`, default `hub`) |
 | `events.json` | Dated changes drawn on the charts (`{"date": "YYYY-MM-DD", "label": "..."}`) | Working directory (`FLOW_EVENTS_FILE`) |
 
-Log events are cached per rolled log file under `.cache/`. Servers delete logs after about three months, so what the logs say about each new player (hub visits, first visit length, reaching another server, coming back within 7 days) is also kept in `data/<world>-<hash>/flow-history.json`, frozen 8 days after the first join. Unlike `.cache/`, `data/` cannot be rebuilt: back it up. Players who joined before the first run with logs still covering them stay unknown; the page says so where it matters.
+Log events are cached per rolled log file under `.cache/`. Servers delete logs after about three months, so what the logs say about each new player (hub visits, first visit length, reaching another server, coming back within 7 days) is also kept in `data/<world>-<hash>/flow-history.json`, frozen 8 days after the first join. `data/<world>-<hash>/pack-releases.json` notes when each resource pack release first appeared in Architect's table, which only keeps each player's latest pack without a time; releases already there on the first run have no date. Unlike `.cache/`, `data/` cannot be rebuilt: back it up. Players who joined before the first run with logs still covering them stay unknown; the page says so where it matters.
 
 ## Map features
 
@@ -112,7 +114,7 @@ This runs the server (with hot reload via tsx) and the Vite dev server concurren
 | `POST /api/heatmap/render` | Render a heatmap with date filters, viewport or area |
 | `POST /api/heatmap/dropout` | Render the dropout heatmap (single-session players since `cutoffDate`) |
 | `GET /api/heatmaps/{id}/heatmap.png`, `/api/heatmaps/{id}/contours.json` | A rendered heatmap (the last 50 are kept in memory) |
-| `GET /api/flow?from=&to=` | Flow totals, series, breakdowns, pack health and the current signals |
+| `GET /api/flow?from=&to=` | Flow totals, series, breakdowns, pack health, the last 24 hours and new releases, each marker's before and after, and the current signals |
 | `GET /api/flow/players?from=&to=&outcome=&limit=&offset=` | New players in a range, newest first |
 
 ## Tech Stack

@@ -242,6 +242,55 @@ export interface PackHealthRow {
   declined: number;
   /** Whether new players got this release in the last 14 days */
   current: boolean;
+  /** When the tool first saw it; null when it was already there when tracking started */
+  firstSeen: number | null;
+}
+
+/** Pack results of one game version within a group of players */
+export interface VersionPackResults {
+  /** ViaVersion's name for the client protocol, or 'Unknown' */
+  version: string;
+  matchesServer: boolean;
+  players: number;
+  loaded: number;
+  failed: number;
+  declined: number;
+  /** New players only: how many finished the intro */
+  finished?: number;
+  /** New players only: the releases they got, most common first */
+  releases?: string[];
+}
+
+/** A release the tool saw appear: every player whose latest pack it is, by game version */
+export interface NewRelease {
+  pack: string;
+  version: string;
+  variant: string;
+  firstSeen: number;
+  players: number;
+  loaded: number;
+  failed: number;
+  declined: number;
+  byClient: VersionPackResults[];
+}
+
+/** The fast check: the last 24 hours and the newest releases, whatever range is selected */
+export interface ReleaseCheck {
+  /** Since when new releases are noted; null before the first pack data */
+  trackingSince: number | null;
+  last24h: { from: number; to: number; players: number; byClient: VersionPackResults[] };
+  /** Releases first seen in the last 7 days, newest first */
+  newReleases: NewRelease[];
+}
+
+/** One marker's 7 days before against the 7 days after */
+export interface EventImpact extends FlowEvent {
+  /** Null when the hub had not opened yet */
+  before: FlowCounts | null;
+  after: FlowCounts;
+  /** Days each side covers: the hub's opening cuts "before", today cuts "after" */
+  beforeDays: number;
+  afterDays: number;
 }
 
 export interface SessionStats {
@@ -273,6 +322,9 @@ export interface FlowResponse {
   /** The fixed window the signals compare: [from, to] against [baselineFrom, from) */
   signalWindow: { from: number; to: number; baselineFrom: number };
   packHealth: PackHealthRow[];
+  releaseCheck: ReleaseCheck;
+  /** Every marker, not only those in the range */
+  eventImpacts: EventImpact[];
 }
 
 /** The current signals alone, for watchers such as the admin dashboard */

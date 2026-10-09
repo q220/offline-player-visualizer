@@ -1,5 +1,6 @@
 import type {
-  FlowCounts, FlowPlayer, FlowPlayersResponse, FlowResponse, FlowSignal, IntroStatus, PackHealthRow, PackResultGroup,
+  EventImpact, FlowCounts, FlowPlayer, FlowPlayersResponse, FlowResponse, FlowSignal, IntroStatus, PackHealthRow, PackResultGroup,
+  ReleaseCheck, VersionPackResults,
 } from '../../shared/protocol';
 import { DEFAULT_HUB_DATE } from '../../shared/protocol';
 import { apiUrl } from '../api';
@@ -9,6 +10,11 @@ import { renderShareChart, renderShareTable, sparkline, renderFunnel, type Share
 const DAY = 86_400_000;
 const RELOAD_MS = 5 * 60_000;
 const PAGE_SIZE = 25;
+/** Same bar as the server's fast check: enough players tried the pack, and most of them failed */
+const FAST_MIN_TRIED = 8;
+const FAST_FAIL_RATE = 0.6;
+/** Fewer players than this and a before/after share is left out */
+const IMPACT_MIN = 5;
 
 const OUTCOME_LABEL: Record<IntroStatus, string> = {
   finished: 'Finished',
@@ -146,9 +152,11 @@ function render(): void {
     ? `${fmtDay(data.range.from)} to today, compared with the ${periodName()} before`
     : `${fmtDay(data.range.from)} to today`;
   renderSignals(data.signals);
+  renderReleaseCheck(data.releaseCheck, data.sources.packs);
   renderKpis(data);
   renderFunnelCard(data);
   renderCharts();
+  renderEventImpacts(data.eventImpacts);
   renderByClient(data);
   renderByResult(data);
   renderTries(data);
@@ -174,6 +182,118 @@ function renderSignals(signals: FlowSignal[]): void {
   $('signal-list').replaceChildren(...signals.map((s) => h('li', { class: `signal ${s.level}` },
     h('div', { class: 'signal-level' }, statusIcon(s.level), LEVEL_LABEL[s.level]),
     h('div', { class: 'signal-body' }, h('strong', {}, s.title), h('p', {}, s.detail)))));
+}
+
+/* ---- The last 24 hours and new releases ---- */
+
+const tried = (v: { loaded: number; failed: number }) => v.loaded + v.failed;
+
+function failCell(v: { loaded: number; failed: number }): HTMLElement | string {
+  const n = tried(v);
+  if (n === 0) return '–';
+  const high = n >= FAST_MIN_TRIED && v.failed / n >= FAST_FAIL_RATE;
+  return h('span', { class: 'fail-cell', title: `${fmtInt(v.failed)} of ${fmtInt(n)}` },
+    meter(v.failed, n, 'var(--series-7)'),
+    high ? h('span', { class: 'flag critical' }, statusIcon('critical'), 'Failing') : null);
+}
+
+function versionLabel(v: VersionPackResults): HTMLElement {
+  return h('span', { class: 'version-cell' }, v.version, v.matchesServer ? h('span', { class: 'tag' }, 'current server version') : null);
+}
+
+function renderReleaseCheck(rc: ReleaseCheck, packs: boolean): void {
+  const versions = $('fast-versions');
+  if (!packs) {
+    versions.replaceChildren(h('p', { class: 'empty' }, 'Pack results are unavailable: the Architect database could not be reached.'));
+  } else if (rc.last24h.players === 0) {
+    versions.replaceChildren(h('p', { class: 'empty' }, 'No new players in the last 24 hours.'));
+  } else {
+    versions.replaceChildren(table(
+      [
+        { label: 'Game version' }, { label: 'New players', num: true }, { label: 'Loaded', num: true }, { label: 'Failed to load' },
+        { label: 'Declined', num: true }, { label: 'Finished the intro' }, { label: 'Packs they got' },
+      ],
+      rc.last24h.byClient.map((v) => [
+        versionLabel(v), fmtInt(v.players), fmtInt(v.loaded), failCell(v), fmtInt(v.declined),
+        meter(v.finished ?? 0, v.players, 'var(--series-1)'),
+        v.releases?.length ? v.releases.slice(0, 2).join(', ') + (v.releases.length > 2 ? ` +${v.releases.length - 2}` : '') : '–',
+      ])),
+    h('p', { class: 'table-note' }, `${fmtInt(rc.last24h.players)} new players since ${fmtDateTime(rc.last24h.from)}. Failing: at least ${FAST_MIN_TRIED} tried the pack and ${Math.round(FAST_FAIL_RATE * 100)}% or more of them failed; this raises a critical signal.`));
+  }
+
+  const releases = $('new-releases');
+  if (rc.trackingSince === null) {
+    releases.replaceChildren(h('p', { class: 'empty' }, 'Waiting for the first pack data.'));
+    return;
+  }
+  if (rc.newReleases.length === 0) {
+    releases.replaceChildren(h('p', { class: 'empty' },
+      `None in the last 7 days. Releases are noted the first time a player gets one (within 15 minutes); tracking started ${fmtDateTime(rc.trackingSince)}.`));
+    return;
+  }
+  const rows: (HTMLElement | string)[][] = [];
+  for (const r of rc.newReleases) {
+    for (const v of r.byClient) {
+      rows.push([`${r.variant} ${r.version}`, fmtDateTime(r.firstSeen), versionLabel(v), fmtInt(v.players), fmtInt(v.loaded), failCell(v), fmtInt(v.declined)]);
+    }
+  }
+  releases.replaceChildren(table(
+    [
+      { label: 'Release' }, { label: 'First seen' }, { label: 'Game version' }, { label: 'Players', num: true },
+      { label: 'Loaded', num: true }, { label: 'Failed to load' }, { label: 'Declined', num: true },
+    ], rows),
+  h('p', { class: 'table-note' }, 'Every player whose latest pack is the release, not only new players. Releases stay here for 7 days after they first appear.'));
+}
+
+/* ---- Before and after each event ---- */
+
+/** "62% → 31%" with the change in points, or a count a day */
+function changeCell(before: [number, number] | null, after: [number, number], upIsGood: boolean, perDay = false): HTMLElement | string {
+  const value = ([n, d]: [number, number]) => (perDay ? (d > 0 ? n / d : null) : d >= IMPACT_MIN ? n / d : null);
+  const show = (v: number | null) => (v === null ? '–' : perDay ? v.toFixed(1) : `${Math.round(v * 100)}%`);
+  const a = value(after);
+  const b = before ? value(before) : null;
+  if (a === null && b === null) return '–';
+  let change: HTMLElement | null = null;
+  if (a !== null && b !== null) {
+    const diff = perDay ? (b > 0 ? Math.round(((a - b) / b) * 100) : 0) : Math.round((a - b) * 100);
+    const small = Math.abs(diff) < (perDay ? 10 : 3);
+    const tone = small ? 'neutral' : (diff > 0) === upIsGood ? 'good' : 'bad';
+    change = h('span', { class: `change ${tone}` },
+      small ? 'about the same' : `${diff > 0 ? '▲' : '▼'} ${Math.abs(diff)}${perDay ? '%' : ' pts'}`);
+  }
+  return h('span', { class: 'change-cell' }, `${show(b)} → ${show(a)}`, change);
+}
+
+function renderEventImpacts(impacts: EventImpact[]): void {
+  const el = $('event-impacts');
+  if (impacts.length === 0) {
+    el.replaceChildren(h('p', { class: 'empty' }, 'No markers yet: add dated changes to events.json.'));
+    return;
+  }
+  const pair = (c: FlowCounts | null, num: (c: FlowCounts) => number, den: (c: FlowCounts) => number): [number, number] | null =>
+    c ? [num(c), den(c)] : null;
+  el.replaceChildren(table(
+    [
+      { label: 'Marker' }, { label: 'New players a day', num: true }, { label: 'Finished the intro', num: true },
+      { label: 'Pack failed to load', num: true }, { label: 'Reached another server', num: true }, { label: 'Came back within 7 days', num: true },
+    ],
+    impacts.map((e) => {
+      const days = Math.floor(e.afterDays);
+      const note = e.afterDays <= 0 ? 'not yet' : e.afterDays < 7 ? `after: ${days === 0 ? 'less than a day' : `${days} of 7 days`} so far` : null;
+      return [
+        h('span', { class: 'event-cell' }, h('span', {}, `${fmtDay(new Date(e.date + 'T00:00').getTime())}: ${e.label}`),
+          note ? h('span', { class: 'muted' }, note) : null,
+          e.before === null ? h('span', { class: 'muted' }, 'before the hub opened') : null),
+        changeCell(e.before ? [e.before.players, e.beforeDays] : null, [e.after.players, e.afterDays], true, true),
+        changeCell(pair(e.before, (c) => c.finished, (c) => c.players), [e.after.finished, e.after.players], true),
+        changeCell(pair(e.before, (c) => c.packFailed, (c) => c.packKnown), [e.after.packFailed, e.after.packKnown], false),
+        changeCell(pair(e.before, (c) => c.reachedServer, (c) => c.activityKnown), [e.after.reachedServer, e.after.activityKnown], true),
+        changeCell(pair(e.before, (c) => c.returned7d, (c) => c.returnEligible), [e.after.returned7d, e.after.returnEligible], true),
+      ];
+    })),
+  h('p', { class: 'table-note' },
+    `Newest first. Shares need at least ${IMPACT_MIN} players. Windows of markers less than 7 days apart overlap. Came back within 7 days only counts players who joined at least 7 days ago; server moves are known from the proxy logs.`));
 }
 
 /* ---- KPI tiles ---- */
@@ -449,7 +569,10 @@ function renderPackHealth(rows: PackHealthRow[]): void {
       visible.map((r) => {
         const high = r.players >= 20 && r.failed / r.players >= 0.3;
         return [
-          `${r.variant} ${r.version}`, fmtInt(r.players), fmtPct(r.loaded, r.players),
+          r.firstSeen !== null
+            ? h('span', { class: 'version-cell' }, `${r.variant} ${r.version}`, h('span', { class: 'tag', title: `First seen ${fmtDateTime(r.firstSeen)}` }, `new ${fmtDay(r.firstSeen)}`))
+            : `${r.variant} ${r.version}`,
+          fmtInt(r.players), fmtPct(r.loaded, r.players),
           h('span', { class: 'fail-cell' }, fmtPct(r.failed, r.players),
             high ? h('span', { class: 'flag critical' }, statusIcon('critical'), 'High') : null),
         ];
