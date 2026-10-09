@@ -9,6 +9,7 @@ import { loadProxyActivity } from './proxy-activity.js';
 import { loadClientVersions } from './client-versions.js';
 import { FlowModel, loadFlowEvents } from './flow.js';
 import { FlowHistory, historyFile } from './flow-history.js';
+import { ReleaseLog, releaseLogFile } from './release-log.js';
 
 /** The flow model the API serves; replaced whole on every refresh */
 export const liveData: { flow: FlowModel | null } = { flow: null };
@@ -17,6 +18,7 @@ export const liveData: { flow: FlowModel | null } = { flow: null };
 const CACHE_SAVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 let lastCacheSave = 0;
 let history: FlowHistory | null = null;
+let releases: ReleaseLog | null = null;
 
 /**
  * Re-read everything the flow and the map are built from: player files
@@ -55,14 +57,22 @@ export async function refreshData(opts: { initial: boolean; serverVersion: strin
   ]);
   const events = loadFlowEvents();
   history ??= FlowHistory.load();
+  releases ??= ReleaseLog.load();
+  // Without pack data nothing is noted, so a release is never dated by an outage
+  if (packs) releases.observe([...packs.values()].filter((p) => p.pack && p.version), Date.now());
   const flow = new FlowModel({
-    players: indexed.players, intro, packs, sessions, activity, clients, history, serverVersion: opts.serverVersion, events,
+    players: indexed.players, intro, packs, sessions, activity, clients, history, releases, serverVersion: opts.serverVersion, events,
   });
   flow.recordHistory(history);
   try {
     if (history.save() && opts.initial) console.log(`  Saved flow history (${history.size} players) to ${historyFile}`);
   } catch (e) {
     console.warn('  Failed to save flow history:', e);
+  }
+  try {
+    if (releases.save() && opts.initial) console.log(`  Saved pack release log to ${releaseLogFile}`);
+  } catch (e) {
+    console.warn('  Failed to save pack release log:', e);
   }
   liveData.flow = flow;
 

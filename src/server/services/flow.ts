@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import type {
-  ClientGroup, FlowBucket, FlowCounts, FlowEvent, FlowPlayer, FlowResponse, FlowSignal, FlowSignalsResponse, IntroStatus,
-  PackGroup, PackHealthRow, PackInfo, PackResult, PackResultGroup, PlayerRecord, SessionStats,
+  ClientGroup, EventImpact, FlowBucket, FlowCounts, FlowEvent, FlowPlayer, FlowResponse, FlowSignal, FlowSignalsResponse, IntroStatus,
+  NewRelease, PackGroup, PackHealthRow, PackInfo, PackResult, PackResultGroup, PlayerRecord, ReleaseCheck, SessionStats,
+  VersionPackResults,
 } from '../../shared/protocol.js';
 import { clientVersionName } from '../../shared/constants.js';
 import { DEFAULT_HUB_DATE } from '../../shared/protocol.js';
@@ -10,6 +11,7 @@ import { introStatus, type IntroData } from './intro-progress.js';
 import type { SessionData } from './hub-sessions.js';
 import type { ProxyActivity } from './proxy-activity.js';
 import type { FlowHistory, LoggedFields } from './flow-history.js';
+import { releaseKey, type ReleaseLog } from './release-log.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const RETURN_WINDOW_MS = 7 * DAY;
@@ -26,6 +28,16 @@ const SIGNAL_MIN_PLAYERS = 15;
 /** A pack release needs this many players before its failure rate is judged */
 const PACK_MIN_PLAYERS = 20;
 const PACK_FAIL_RATE = 0.3;
+/** The fast check: new players' pack results over the last day, and releases the tool saw appear */
+const FAST_WINDOW_MS = DAY;
+const NEW_RELEASE_MS = 7 * DAY;
+/** How long a new release's results stay among the signals while it is not failing */
+const RELEASE_NOTE_MS = 3 * DAY;
+/** A game version fails when this many of its players tried the pack (loaded or failed) and this share failed */
+const FAST_MIN_TRIED = 8;
+const FAST_FAIL_RATE = 0.6;
+/** Markers compare the 7 days before with the 7 days after */
+const EVENT_WINDOW_MS = 7 * DAY;
 
 const OUTCOMES: IntroStatus[] = ['finished', 'welcome', 'compatibility', 'other'];
 
@@ -39,6 +51,8 @@ export interface FlowSources {
   clients: Map<string, number> | null;
   /** What the logs said before they were deleted */
   history: FlowHistory | null;
+  /** When each pack release first appeared */
+  releases: ReleaseLog | null;
   serverVersion: string;
   events: FlowEvent[];
 }
@@ -126,12 +140,38 @@ function compareVersions(a: string, b: string): number {
 }
 
 const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
+const tried = (r: { loaded: number; failed: number }) => r.loaded + r.failed;
+const failing = (r: { loaded: number; failed: number }) => tried(r) >= FAST_MIN_TRIED && r.failed / tried(r) >= FAST_FAIL_RATE;
+const releaseName = (r: { variant: string; version: string }) => `${r.variant} ${r.version}`;
+/** Signal ids reach the admin dashboard, which takes [\w.:-] only */
+const signalId = (...parts: string[]) => parts.map((p) => p.replace(/[^\w.-]/g, '_')).join(':').slice(0, 80);
+const WHEN = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
+
+function emptyVersion(version: string, matchesServer: boolean): VersionPackResults {
+  return { version, matchesServer, players: 0, loaded: 0, failed: 0, declined: 0 };
+}
+
+function addResult(v: { players: number; loaded: number; failed: number; declined: number }, result: PackResult | undefined): void {
+  v.players++;
+  if (result === 'loaded') v.loaded++;
+  else if (result && isFailure(result)) v.failed++;
+  else if (result === 'declined') v.declined++;
+}
+
+/** "26.3: 12 of 14 failed" per game version with results */
+function versionSummary(byClient: VersionPackResults[], word: 'failed' | 'loaded'): string {
+  return byClient
+    .filter((v) => tried(v) > 0)
+    .map((v) => `${v.version}: ${(word === 'failed' ? v.failed : v.loaded).toLocaleString('en-US')} of ${tried(v).toLocaleString('en-US')} ${word}`)
+    .join(', ');
+}
 const plural = (n: number, word: string) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`;
 
 export class FlowModel {
   /** New players since the hub intro opened, newest first */
   private readonly flowPlayers: FlowPlayer[];
   private readonly packHealthRows: PackHealthRow[];
+  private readonly fastCheck: ReleaseCheck;
   /** What the current logs say about each covered player, to keep in the history */
   private readonly fromLogs = new Map<string, { firstJoined: number; logged: LoggedFields }>();
 
@@ -141,6 +181,7 @@ export class FlowModel {
       .map((p) => this.toFlowPlayer(p))
       .sort((a, b) => b.firstJoined - a.firstJoined);
     this.packHealthRows = this.buildPackHealth();
+    this.fastCheck = this.buildReleaseCheck();
   }
 
   private toFlowPlayer(p: PlayerRecord): FlowPlayer {
@@ -295,7 +336,28 @@ export class FlowModel {
       signals: this.signals(),
       signalWindow: { from: signalFrom, to: signalTo, baselineFrom: signalFrom - SIGNAL_BASELINE_MS },
       packHealth: this.packHealthRows,
+      releaseCheck: this.fastCheck,
+      eventImpacts: this.eventImpacts(),
     };
+  }
+
+  /** Each marker's 7 days before against the 7 days after, newest first */
+  private eventImpacts(): EventImpact[] {
+    return this.src.events.map((e) => {
+      const [y, m, d] = e.date.split('-').map(Number);
+      const at = new Date(y, m - 1, d).getTime();
+      const beforeFrom = Math.max(at - EVENT_WINDOW_MS, DEFAULT_HUB_DATE);
+      const afterTo = Math.max(at, Math.min(at + EVENT_WINDOW_MS, this.generatedAt));
+      const opened = at > DEFAULT_HUB_DATE;
+      return {
+        date: e.date,
+        label: e.label,
+        before: opened ? this.counts(this.inRange(beforeFrom, at)) : null,
+        after: this.counts(this.inRange(at, afterTo)),
+        beforeDays: opened ? (at - beforeFrom) / DAY : 0,
+        afterDays: (afterTo - at) / DAY,
+      };
+    }).reverse();
   }
 
   /**
@@ -342,6 +404,7 @@ export class FlowModel {
         rows.set(key, (r = {
           pack: info.pack, version: info.version, variant: info.variant,
           players: 0, loaded: 0, failed: 0, declined: 0, current: recent.has(key),
+          firstSeen: this.src.releases?.firstSeen(info) ?? null,
         }));
       }
       r.players++;
@@ -354,6 +417,132 @@ export class FlowModel {
       .sort((a, b) => a.pack.localeCompare(b.pack) || compareVersions(b.version, a.version) || a.variant.localeCompare(b.variant));
   }
 
+  private versionOf(uuid: string): string {
+    return this.clientVersion(uuid) ?? 'Unknown';
+  }
+
+  /** New players' pack results over the last day, and every player's results for releases that just appeared */
+  private buildReleaseCheck(): ReleaseCheck {
+    const serverVersion = this.src.serverVersion;
+    const sortVersions = (a: VersionPackResults, b: VersionPackResults) => b.players - a.players;
+
+    const from = this.generatedAt - FAST_WINDOW_MS;
+    const recent = this.inRange(from, this.generatedAt + 1);
+    const groups = new Map<string, VersionPackResults & { releaseCounts: Map<string, number> }>();
+    for (const p of recent) {
+      const version = p.clientVersion ?? 'Unknown';
+      let g = groups.get(version);
+      if (!g) groups.set(version, (g = { ...emptyVersion(version, version === serverVersion), finished: 0, releaseCounts: new Map() }));
+      addResult(g, p.pack?.result);
+      if (p.outcome === 'finished') g.finished!++;
+      if (p.pack?.pack) {
+        const name = releaseName(p.pack);
+        g.releaseCounts.set(name, (g.releaseCounts.get(name) ?? 0) + 1);
+      }
+    }
+    const last24h = [...groups.values()].map(({ releaseCounts, ...g }) => ({
+      ...g,
+      releases: [...releaseCounts].sort((a, b) => b[1] - a[1]).map(([name]) => name),
+    })).sort(sortVersions);
+
+    const newReleases: NewRelease[] = [];
+    const log = this.src.releases;
+    if (log && this.src.packs) {
+      const byKey = new Map<string, NewRelease & { versions: Map<string, VersionPackResults> }>();
+      for (const [uuid, info] of this.src.packs) {
+        if (!info.pack || !info.version) continue;
+        const seen = log.firstSeen(info);
+        if (seen === null || seen === undefined || this.generatedAt - seen > NEW_RELEASE_MS) continue;
+        const key = releaseKey(info);
+        let r = byKey.get(key);
+        if (!r) {
+          byKey.set(key, (r = {
+            pack: info.pack, version: info.version, variant: info.variant, firstSeen: seen,
+            players: 0, loaded: 0, failed: 0, declined: 0, byClient: [], versions: new Map(),
+          }));
+        }
+        addResult(r, info.result);
+        const version = this.versionOf(uuid);
+        let v = r.versions.get(version);
+        if (!v) r.versions.set(version, (v = emptyVersion(version, version === serverVersion)));
+        addResult(v, info.result);
+      }
+      for (const { versions, ...r } of byKey.values()) newReleases.push({ ...r, byClient: [...versions.values()].sort(sortVersions) });
+      newReleases.sort((a, b) => b.firstSeen - a.firstSeen);
+    }
+
+    return {
+      trackingSince: log?.since ?? null,
+      last24h: { from, to: this.generatedAt, players: recent.length, byClient: last24h },
+      newReleases,
+    };
+  }
+
+  /** The fast check's signals: game versions whose pack fails today, and how new releases do */
+  private fastSignals(): FlowSignal[] {
+    const out: FlowSignal[] = [];
+    const { last24h, newReleases } = this.fastCheck;
+    const serverVersion = this.src.serverVersion;
+    const own = last24h.byClient.find((v) => v.version === serverVersion);
+
+    if (this.src.packs) {
+      for (const v of last24h.byClient.filter(failing)) {
+        const compare = own && v !== own && tried(own) > 0
+          ? ` On ${serverVersion}, the server's version, it failed for ${own.failed.toLocaleString('en-US')} of ${tried(own).toLocaleString('en-US')}.`
+          : '';
+        out.push({
+          id: signalId('pack-24h', v.version),
+          level: 'critical',
+          title: `Resource pack failed to load for ${v.failed.toLocaleString('en-US')} of ${tried(v).toLocaleString('en-US')} new ${v.version} players in the last 24 hours`,
+          detail: `Counting new players who accepted the pack and reported a result.${v.releases?.length ? ` They got ${v.releases.slice(0, 3).join(', ')}.` : ''}${compare}`,
+        });
+      }
+    }
+
+    const everyPlayer = 'every player whose latest pack it is, not only new players';
+    // Notes on releases that are not failing: one per pack version, its variants together
+    const notes = new Map<string, { pack: string; version: string; firstSeen: number; variants: string[]; versions: Map<string, VersionPackResults> }>();
+    for (const r of newReleases) {
+      const bad = r.byClient.filter(failing);
+      if (bad.length > 0) {
+        out.push({
+          id: signalId('release', r.pack, r.variant, r.version),
+          level: 'critical',
+          title: `New pack release ${releaseName(r)} fails to load for ${bad.map((v) => v.version).join(' and ')} players`,
+          detail: `First seen ${WHEN.format(r.firstSeen)}; ${everyPlayer}: ${versionSummary(r.byClient, 'failed')}.`,
+        });
+        continue;
+      }
+      if (this.generatedAt - r.firstSeen > RELEASE_NOTE_MS || tried(r) === 0) continue;
+      const key = `${r.pack}\0${r.version}`;
+      let note = notes.get(key);
+      if (!note) notes.set(key, (note = { pack: r.pack, version: r.version, firstSeen: r.firstSeen, variants: [], versions: new Map() }));
+      note.firstSeen = Math.min(note.firstSeen, r.firstSeen);
+      note.variants.push(r.variant);
+      for (const v of r.byClient) {
+        let sum = note.versions.get(v.version);
+        if (!sum) note.versions.set(v.version, (sum = emptyVersion(v.version, v.matchesServer)));
+        sum.players += v.players;
+        sum.loaded += v.loaded;
+        sum.failed += v.failed;
+        sum.declined += v.declined;
+      }
+    }
+    for (const n of notes.values()) {
+      const byClient = [...n.versions.values()].sort((a, b) => b.players - a.players);
+      const total = byClient.reduce((t, v) => t + tried(v), 0);
+      const settled = total >= 10 && byClient.every((v) => tried(v) < 5 || v.failed / tried(v) < 0.25);
+      const name = `${n.pack} ${n.version}`;
+      out.push({
+        id: signalId('release-new', n.pack, n.version),
+        level: settled ? 'good' : 'info',
+        title: settled ? `New pack release ${name} loads` : `New pack release ${name}: first results`,
+        detail: `First seen ${WHEN.format(n.firstSeen)}, ${n.variants.length === 1 ? 'variant' : 'variants'} ${n.variants.sort().join(', ')}; ${everyPlayer}: ${versionSummary(byClient, 'loaded')}.`,
+      });
+    }
+    return out;
+  }
+
   /** What changed in the last 14 days against the 8 weeks before */
   private signals(): FlowSignal[] {
     const to = this.generatedAt;
@@ -361,15 +550,17 @@ export class FlowModel {
     const recentPlayers = this.inRange(from, to + 1);
     const recent = this.counts(recentPlayers);
     const base = this.counts(this.inRange(Math.max(from - SIGNAL_BASELINE_MS, DEFAULT_HUB_DATE), from));
-    const out: FlowSignal[] = [];
+    const out: FlowSignal[] = this.fastSignals();
+    const order = { critical: 0, warning: 1, info: 2, good: 3 };
 
     if (recent.players < SIGNAL_MIN_PLAYERS || base.players < SIGNAL_MIN_PLAYERS) {
-      return [{
+      out.push({
         id: 'not-enough-data',
         level: 'info',
         title: 'Not enough new players to judge',
         detail: `${plural(recent.players, 'new player')} in the last 14 days and ${base.players.toLocaleString('en-US')} in the 8 weeks before; signals need at least ${SIGNAL_MIN_PLAYERS} in each.`,
-      }];
+      });
+      return out.sort((a, b) => order[a.level] - order[b.level]);
     }
 
     const rate = (c: FlowCounts, k: keyof FlowCounts) => c[k] / c.players;
@@ -465,20 +656,30 @@ export class FlowModel {
       }
     }
 
-    // Releases being sent now that fail for many players
-    const failing = this.packHealthRows
-      .filter((r) => r.current && r.players >= PACK_MIN_PLAYERS && r.failed / r.players >= PACK_FAIL_RATE)
+    // Releases new players got in the window that failed for many of them. Only
+    // new players of the window count: all-time records keep the failures of
+    // players who never came back, so a fixed release would stay flagged
+    const releases = new Map<string, { variant: string; version: string; players: number; failed: number }>();
+    for (const p of recentPlayers) {
+      if (!p.pack?.pack) continue;
+      const key = releaseKey(p.pack);
+      let r = releases.get(key);
+      if (!r) releases.set(key, (r = { variant: p.pack.variant, version: p.pack.version, players: 0, failed: 0 }));
+      r.players++;
+      if (isFailure(p.pack.result)) r.failed++;
+    }
+    const failingReleases = [...releases.values()]
+      .filter((r) => r.players >= PACK_MIN_PLAYERS && r.failed / r.players >= PACK_FAIL_RATE)
       .sort((a, b) => b.failed / b.players - a.failed / a.players);
-    if (failing.length > 0) {
-      const name = (r: PackHealthRow) => `${r.variant} ${r.version}`;
-      const rates = failing.map((r) => `${name(r)}: ${r.failed.toLocaleString('en-US')} of ${r.players.toLocaleString('en-US')} (${pct(r.failed, r.players)}%)`);
+    if (failingReleases.length > 0) {
+      const rates = failingReleases.map((r) => `${releaseName(r)}: ${r.failed.toLocaleString('en-US')} of ${r.players.toLocaleString('en-US')} (${pct(r.failed, r.players)}%)`);
       out.push({
         id: 'pack-releases',
         level: 'critical',
-        title: failing.length === 1
-          ? `${name(failing[0])} fails to load for ${pct(failing[0].failed, failing[0].players)}% of players`
-          : `${failing.length} pack releases fail to load for most players`,
-        detail: `Players whose latest pack is the release and who reported a failed load: ${rates.join('; ')}. New players got ${failing.length === 1 ? 'it' : 'these'} in the last 14 days.`,
+        title: failingReleases.length === 1
+          ? `${releaseName(failingReleases[0])} fails to load for ${pct(failingReleases[0].failed, failingReleases[0].players)}% of new players`
+          : `${failingReleases.length} pack releases fail to load for many new players`,
+        detail: `New players in the last 14 days who got the release and reported a failed load: ${rates.join('; ')}.`,
       });
     }
 
@@ -562,7 +763,6 @@ export class FlowModel {
       });
     }
 
-    const order = { critical: 0, warning: 1, info: 2, good: 3 };
     return out.sort((a, b) => order[a.level] - order[b.level]);
   }
 }

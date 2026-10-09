@@ -33,6 +33,16 @@
           <ul class="signal-list" id="signal-list"></ul>
         </section>
 
+        <section class="card" aria-labelledby="fast-title">
+          <div class="card-head">
+            <h2 id="fast-title">Resource packs in the last 24 hours</h2>
+            <p class="card-sub">New players by game version, whatever range is selected below. A pack counts as failed for players who accepted it and reported a failed load.</p>
+          </div>
+          <div id="fast-versions"></div>
+          <h3 class="subhead">New pack releases</h3>
+          <div id="new-releases"></div>
+        </section>
+
         <div class="filter-row" role="group" aria-label="Date range">
           <span class="filter-label">Range</span>
           <div class="segmented" id="range-buttons">
@@ -70,6 +80,14 @@
               <button type="button" class="link-btn table-toggle" data-chart="pack">Show table</button>
             </div>
             <div class="chart" id="pack-chart"></div>
+          </section>
+
+          <section class="card" aria-labelledby="impact-title">
+            <div class="card-head">
+              <h2 id="impact-title">Before and after each event</h2>
+              <p class="card-sub">New players in the 7 days before each marker against the 7 days after, for every marker whatever the range. Markers come from <code>events.json</code>.</p>
+            </div>
+            <div id="event-impacts"></div>
           </section>
 
           <section class="card" aria-labelledby="by-client-title">

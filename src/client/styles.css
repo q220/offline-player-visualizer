@@ -1411,6 +1411,45 @@ body {
   align-items: center;
 }
 
+.subhead {
+  margin: 16px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.card-sub code {
+  font-size: 11px;
+}
+
+/* Before and after: "62% → 31%" over the change */
+.change-cell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.change-cell .change {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.change.good { color: var(--good-text); }
+.change.bad { color: var(--critical); }
+.change.neutral { color: var(--text-secondary); font-weight: 400; }
+
+.event-cell {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  white-space: normal;
+  min-width: 180px;
+}
+
+.event-cell .muted {
+  font-size: 11px;
+}
+
 .flag {
   display: inline-flex;
   align-items: center;
