@@ -499,25 +499,46 @@ export class FlowModel {
       }
     }
 
+    const everyPlayer = 'every player whose latest pack it is, not only new players';
+    // Notes on releases that are not failing: one per pack version, its variants together
+    const notes = new Map<string, { pack: string; version: string; firstSeen: number; variants: string[]; versions: Map<string, VersionPackResults> }>();
     for (const r of newReleases) {
       const bad = r.byClient.filter(failing);
-      const since = `First seen ${WHEN.format(r.firstSeen)}; every player whose latest pack it is, not only new players`;
       if (bad.length > 0) {
         out.push({
           id: signalId('release', r.pack, r.variant, r.version),
           level: 'critical',
           title: `New pack release ${releaseName(r)} fails to load for ${bad.map((v) => v.version).join(' and ')} players`,
-          detail: `${since}: ${versionSummary(r.byClient, 'failed')}.`,
+          detail: `First seen ${WHEN.format(r.firstSeen)}; ${everyPlayer}: ${versionSummary(r.byClient, 'failed')}.`,
         });
-      } else if (this.generatedAt - r.firstSeen <= RELEASE_NOTE_MS && tried(r) > 0) {
-        const settled = tried(r) >= 10 && r.byClient.every((v) => tried(v) < 5 || v.failed / tried(v) < 0.25);
-        out.push({
-          id: signalId('release-new', r.pack, r.variant, r.version),
-          level: settled ? 'good' : 'info',
-          title: settled ? `New pack release ${releaseName(r)} loads` : `New pack release ${releaseName(r)}: first results`,
-          detail: `${since}: ${versionSummary(r.byClient, 'loaded')}.`,
-        });
+        continue;
       }
+      if (this.generatedAt - r.firstSeen > RELEASE_NOTE_MS || tried(r) === 0) continue;
+      const key = `${r.pack}\0${r.version}`;
+      let note = notes.get(key);
+      if (!note) notes.set(key, (note = { pack: r.pack, version: r.version, firstSeen: r.firstSeen, variants: [], versions: new Map() }));
+      note.firstSeen = Math.min(note.firstSeen, r.firstSeen);
+      note.variants.push(r.variant);
+      for (const v of r.byClient) {
+        let sum = note.versions.get(v.version);
+        if (!sum) note.versions.set(v.version, (sum = emptyVersion(v.version, v.matchesServer)));
+        sum.players += v.players;
+        sum.loaded += v.loaded;
+        sum.failed += v.failed;
+        sum.declined += v.declined;
+      }
+    }
+    for (const n of notes.values()) {
+      const byClient = [...n.versions.values()].sort((a, b) => b.players - a.players);
+      const total = byClient.reduce((t, v) => t + tried(v), 0);
+      const settled = total >= 10 && byClient.every((v) => tried(v) < 5 || v.failed / tried(v) < 0.25);
+      const name = `${n.pack} ${n.version}`;
+      out.push({
+        id: signalId('release-new', n.pack, n.version),
+        level: settled ? 'good' : 'info',
+        title: settled ? `New pack release ${name} loads` : `New pack release ${name}: first results`,
+        detail: `First seen ${WHEN.format(n.firstSeen)}, ${n.variants.length === 1 ? 'variant' : 'variants'} ${n.variants.sort().join(', ')}; ${everyPlayer}: ${versionSummary(byClient, 'loaded')}.`,
+      });
     }
     return out;
   }
